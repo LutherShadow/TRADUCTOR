@@ -7,13 +7,64 @@ import AdmZip from "adm-zip";
 import { createServer as createViteServer } from "vite";
 import { 
   runTranslationTask, 
+  analyzeModFile,
   TranslationTask, 
   TranslationOptions, 
   DEFAULT_GLOSSARY 
 } from "./src/translationEngine";
+import admin from "firebase-admin";
+import { getFirestore } from "firebase-admin/firestore";
 
 const app = express();
 const PORT = 3000;
+
+// Read Firebase configuration from config file
+const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+
+// Initialize Firebase Admin
+admin.initializeApp({
+  projectId: firebaseConfig.projectId
+});
+
+const dbAdmin = firebaseConfig.firestoreDatabaseId 
+  ? getFirestore(firebaseConfig.firestoreDatabaseId)
+  : getFirestore();
+
+// Helper to sync translation task state to Firestore under /users/{userId}/tasks/{taskId}
+async function syncTaskToFirestore(userId: string | undefined, task: TranslationTask) {
+  if (!userId) return;
+  try {
+    const docRef = dbAdmin.collection("users").doc(userId).collection("tasks").doc(task.id);
+    await docRef.set({
+      id: task.id,
+      userId,
+      originalName: task.originalName,
+      translatedName: task.translatedName,
+      status: task.status,
+      progress: task.progress,
+      totalFiles: task.totalFiles,
+      processedFiles: task.processedFiles,
+      stats: {
+        wordsTranslated: task.stats.wordsTranslated || 0,
+        charactersSavedByMemory: task.stats.charactersSavedByMemory || 0,
+        filesTranslated: task.stats.filesTranslated || 0,
+        filesIgnored: task.stats.filesIgnored || 0,
+        errorsCount: task.stats.errorsCount || 0,
+        timeSpentMs: task.stats.timeSpentMs || 0
+      },
+      errors: task.errors || [],
+      logs: task.logs || [],
+      downloadUrl: task.downloadUrl || null,
+      diff: task.diff || [],
+      createdAt: (task as any).createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (err) {
+    console.error(`Error al sincronizar tarea ${task.id} en Firestore:`, err);
+  }
+}
+
 
 // Enable JSON and URL-encoded parsing with higher limits
 app.use(express.json({ limit: "50mb" }));
@@ -72,9 +123,12 @@ async function processQueue() {
   const task = tasks[nextTaskId];
   if (!task) return;
 
+  const userId = (task as any)._userId;
+
   activeWorkersCount++;
   task.status = "processing";
   task.progress = 5;
+  await syncTaskToFirestore(userId, task);
 
   // Retrieve temporary upload file path
   const originalFilePath = (task as any)._originalFilePath;
@@ -89,11 +143,15 @@ async function processQueue() {
       (progress, stats) => {
         task.progress = progress;
         task.stats = { ...task.stats, ...stats };
+        syncTaskToFirestore(userId, task);
       }
     );
+    // Success: runTranslationTask sets task.status = "completed" and progress = 100
+    await syncTaskToFirestore(userId, task);
   } catch (err: any) {
     task.status = "failed";
     task.errors.push(err.message || String(err));
+    await syncTaskToFirestore(userId, task);
   } finally {
     // Clean up uploaded original file to save space
     try {
@@ -153,6 +211,7 @@ app.post("/api/translate", upload.array("files"), (req, res) => {
     }
 
     const createdTaskIds: string[] = [];
+    const userId = req.body.userId || (options as any).userId || undefined;
 
     // Create a translation task for each uploaded JAR file
     for (const file of files) {
@@ -187,10 +246,16 @@ app.post("/api/translate", upload.array("files"), (req, res) => {
       // Store file path and options internally inside the task (not exposed to API)
       (task as any)._originalFilePath = file.path;
       (task as any)._options = options;
+      (task as any)._userId = userId;
+      (task as any).createdAt = new Date().toISOString();
+      (task as any).updatedAt = new Date().toISOString();
 
       tasks[taskId] = task;
       createdTaskIds.push(taskId);
       taskQueue.push(taskId);
+
+      // Initial sync to Firestore
+      syncTaskToFirestore(userId, task);
     }
 
     // Trigger queue processing
@@ -202,6 +267,53 @@ app.post("/api/translate", upload.array("files"), (req, res) => {
   } catch (error: any) {
     console.error("Error en endpoint /api/translate:", error);
     res.status(500).json({ error: error.message || "Error al iniciar la traducción." });
+  }
+});
+
+// Endpoint to pre-analyze a selected Minecraft mod JAR file
+app.post("/api/analyze", upload.single("file"), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: "No se proporcionó ningún archivo para analizar." });
+      return;
+    }
+
+    let options: TranslationOptions = {
+      translateLang: true,
+      translateBooks: true,
+      translateQuests: true,
+      translateDatapacks: true,
+      translateStructures: true,
+      translateAll: false,
+      targetLocale: "es_es",
+      customGlossary: {}
+    };
+
+    if (req.body.options) {
+      try {
+        options = JSON.parse(req.body.options);
+      } catch (err) {
+        console.error("No se pudieron parsear las opciones para análisis, usando valores predeterminados.");
+      }
+    }
+
+    // Perform analysis
+    const result = await analyzeModFile(file.path, options);
+
+    // Clean up uploaded file immediately to save disk space
+    try {
+      if (fs.existsSync(file.path)) {
+        fs.unlinkSync(file.path);
+      }
+    } catch (e) {
+      console.error("Error al limpiar archivo temporal de análisis:", e);
+    }
+
+    res.json(result);
+  } catch (error: any) {
+    console.error("Error en endpoint /api/analyze:", error);
+    res.status(500).json({ error: error.message || "Error al realizar el pre-análisis del mod." });
   }
 });
 
@@ -224,9 +336,22 @@ app.post("/api/tasks/clear", (req, res) => {
 });
 
 // 4. Download a single translated mod JAR
-app.get("/api/download/:taskId", (req, res) => {
+app.get("/api/download/:taskId", async (req, res) => {
   const { taskId } = req.params;
-  const task = tasks[taskId];
+  const userId = req.query.userId as string | undefined;
+
+  let task = tasks[taskId];
+  if (!task && userId) {
+    try {
+      const docSnap = await dbAdmin.collection("users").doc(userId).collection("tasks").doc(taskId).get();
+      if (docSnap.exists) {
+        task = docSnap.data() as TranslationTask;
+      }
+    } catch (e) {
+      console.error("Error al cargar tarea de Firestore para descarga:", e);
+    }
+  }
+
   if (!task || task.status !== "completed") {
     res.status(404).send("Archivo no encontrado o traducción aún en curso.");
     return;
@@ -242,8 +367,26 @@ app.get("/api/download/:taskId", (req, res) => {
 });
 
 // 5. Download ALL translated mods packaged as a single ZIP file
-app.get("/api/download-all", (req, res) => {
-  const completedTasks = Object.values(tasks).filter(t => t.status === "completed");
+app.get("/api/download-all", async (req, res) => {
+  const userId = req.query.userId as string | undefined;
+  let completedTasks: TranslationTask[] = [];
+
+  if (userId) {
+    try {
+      const querySnap = await dbAdmin.collection("users").doc(userId).collection("tasks")
+        .where("status", "==", "completed").get();
+      querySnap.forEach((doc: any) => {
+        completedTasks.push(doc.data() as TranslationTask);
+      });
+    } catch (e) {
+      console.error("Error al consultar tareas completadas de Firestore:", e);
+    }
+  }
+
+  if (completedTasks.length === 0) {
+    completedTasks = Object.values(tasks).filter(t => t.status === "completed");
+  }
+
   if (completedTasks.length === 0) {
     res.status(400).send("No hay traducciones completadas disponibles para descargar.");
     return;

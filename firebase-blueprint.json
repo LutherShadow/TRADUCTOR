@@ -1,0 +1,80 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information and metadata.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "TranslationTask": {
+      "title": "Translation Task",
+      "description": "Represents a single Minecraft JAR mod translation job.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "originalName": { "type": "string", "maxLength": 255 },
+        "translatedName": { "type": "string", "maxLength": 255 },
+        "status": { "type": "string", "enum": ["queued", "processing", "completed", "failed"] },
+        "progress": { "type": "integer" },
+        "totalFiles": { "type": "integer" },
+        "processedFiles": { "type": "integer" },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "wordsTranslated": { "type": "integer" },
+            "charactersSavedByMemory": { "type": "integer" },
+            "filesTranslated": { "type": "integer" },
+            "filesIgnored": { "type": "integer" },
+            "errorsCount": { "type": "integer" },
+            "timeSpentMs": { "type": "integer" }
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "logs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "downloadUrl": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "originalName", "translatedName", "status", "progress", "totalFiles", "processedFiles", "createdAt", "updatedAt"]
+    },
+    "Glossary": {
+      "title": "Custom Glossary",
+      "description": "User's custom translation term overrides.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "terms": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "terms", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Main user collection containing basic profiles"
+    },
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": "TranslationTask",
+      "description": "Subcollection of translation tasks owned by the user"
+    },
+    "/users/{userId}/settings/glossary": {
+      "schema": "Glossary",
+      "description": "User-specific custom glossary mappings"
+    }
+  }
+}

@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global safety net - Default Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- PRIMITIVE GLOBAL HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- ENTITY SCHEMAS & TYPE VALIDATORS ---
+
+    // Validates a User Profile document
+    function isValidUser(data) {
+      return data.uid is string && 
+             data.uid == request.auth.uid &&
+             data.email is string && 
+             data.email.size() <= 255 &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 100)) &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500)) &&
+             data.createdAt is string;
+    }
+
+    // Validates a Translation Task document
+    function isValidTask(data) {
+      return data.id is string && isValidId(data.id) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.originalName is string && data.originalName.size() <= 255 &&
+             data.translatedName is string && data.translatedName.size() <= 255 &&
+             data.status is string && (data.status == 'queued' || data.status == 'processing' || data.status == 'completed' || data.status == 'failed') &&
+             data.progress is int && data.progress >= 0 && data.progress <= 100 &&
+             data.totalFiles is int && data.totalFiles >= 0 &&
+             data.processedFiles is int && data.processedFiles >= 0 &&
+             data.stats is map &&
+             data.stats.wordsTranslated is int &&
+             data.stats.charactersSavedByMemory is int &&
+             data.stats.filesTranslated is int &&
+             data.stats.filesIgnored is int &&
+             data.stats.errorsCount is int &&
+             data.stats.timeSpentMs is int &&
+             data.errors is list && (data.errors.size() == 0 || (data.errors.size() > 0 && data.errors[0] is string)) &&
+             data.logs is list && (data.logs.size() == 0 || (data.logs.size() > 0 && data.logs[0] is string)) &&
+             (!('downloadUrl' in data) || (data.downloadUrl is string && data.downloadUrl.size() <= 500)) &&
+             data.createdAt is string && 
+             data.updatedAt is string &&
+             data.keys().hasAll(['id', 'userId', 'originalName', 'translatedName', 'status', 'progress', 'totalFiles', 'processedFiles', 'stats', 'errors', 'logs', 'createdAt', 'updatedAt']) &&
+             data.keys().size() <= 14;
+    }
+
+    // Validates a Glossary document
+    function isValidGlossary(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.terms is map &&
+             data.updatedAt is string &&
+             data.keys().hasAll(['userId', 'terms', 'updatedAt']) &&
+             data.keys().size() == 3;
+    }
+
+    // --- COLLECTION MATCHES & RULESETS ---
+    
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isEmailVerified() && isValidUser(incoming());
+      allow update: if isOwner(userId) && isEmailVerified() && isValidUser(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if false;
+
+      // Subcollection matching for tasks
+      match /tasks/{taskId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isEmailVerified() && isValidTask(incoming());
+        allow update: if isOwner(userId) && isEmailVerified() && isValidTask(incoming()) && (
+          // Protect core fields from shadow mutations, only allowing progressive updates
+          incoming().diff(existing()).affectedKeys().hasOnly(['progress', 'processedFiles', 'status', 'stats', 'errors', 'logs', 'downloadUrl', 'updatedAt'])
+        );
+        allow delete: if isOwner(userId);
+      }
+
+      // Settings subcollection for custom glossary
+      match /settings/glossary {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isEmailVerified() && isValidGlossary(incoming());
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

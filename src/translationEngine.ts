@@ -53,6 +53,8 @@ export interface TranslationOptions {
   translateAll: boolean;
   targetLocale: "es_es" | "es_mx" | "both";
   customGlossary: Record<string, string>;
+  apiEngine?: string;
+  customApiKeys?: Record<string, string>;
 }
 
 export interface TaskStats {
@@ -76,6 +78,14 @@ export interface TranslationTask {
   errors: string[];
   logs: string[];
   downloadUrl?: string;
+  diff?: TranslationDiffEntry[];
+}
+
+export interface TranslationDiffEntry {
+  path: string;
+  key: string;
+  original: string;
+  translated: string;
 }
 
 // In-Memory Global Translation Memory Cache to speed up across runs
@@ -107,6 +117,19 @@ export function isTranslatableString(str: string): boolean {
   return true;
 }
 
+// Safe utility to overwrite an entry in AdmZip without causing duplicates
+function addOrReplaceFile(zip: AdmZip, entryPath: string, content: Buffer) {
+  try {
+    const existing = zip.getEntry(entryPath);
+    if (existing) {
+      zip.deleteFile(existing);
+    }
+  } catch (e) {
+    // Ignore error if delete fails
+  }
+  zip.addFile(entryPath, content);
+}
+
 // Lazy initialization of Gemini API
 let aiClient: GoogleGenAI | null = null;
 function getAi(): GoogleGenAI {
@@ -127,25 +150,152 @@ function getAi(): GoogleGenAI {
   return aiClient;
 }
 
-// Translates a batch of strings using Gemini 3.5 Flash
+function cleanTranslationPunctuation(str: string): string {
+  if (!str || typeof str !== "string") return str;
+  return str
+    .replace(/§\s+([a-fk-or0-9])/gi, "§$1") // Fix spaced section formatting, e.g., § a -> §a
+    .replace(/%\s+([sddf])/gi, "%$1")       // Fix spaced percent, e.g., % s -> %s
+    .replace(/%\s*(\d+)\s*\$\s*([sddf])/gi, "%$1$$$2") // Fix spaced parameter variables, e.g., % 1 $ s -> %1$s
+    .replace(/{\s*([^}]+)\s*}/g, "{$1}");   // Fix spaced braces, e.g., { player } -> {player}
+}
+
+async function translateFreeGoogle(text: string, targetLangCode: string): Promise<string> {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLangCode}&dt=t&q=${encodeURIComponent(text)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Google Free HTTP Error ${res.status}`);
+  const json = await res.json();
+  if (json && json[0]) {
+    return json[0].map((x: any) => x[0]).join("");
+  }
+  throw new Error("Invalid format from Google Translate Free.");
+}
+
+async function translateWithOpenAICompatible(
+  endpoint: string,
+  modelName: string,
+  apiKey: string,
+  systemInstruction: string,
+  batchPayload: Record<string, string>,
+  useJsonFormat: boolean,
+  headersExtra: Record<string, string> = {}
+): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${apiKey}`,
+    ...headersExtra
+  };
+
+  const body: any = {
+    model: modelName,
+    messages: [
+      { role: "system", content: systemInstruction },
+      { role: "user", content: JSON.stringify(batchPayload) }
+    ]
+  };
+
+  if (useJsonFormat) {
+    body.response_format = { type: "json_object" };
+  }
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`API ${modelName} returned status ${res.status}: ${text}`);
+  }
+
+  const data = await res.json();
+  const content = data.choices?.[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error("La respuesta de la API está vacía.");
+  }
+
+  let cleanContent = content;
+  if (cleanContent.startsWith("```json")) {
+    cleanContent = cleanContent.substring(7);
+  } else if (cleanContent.startsWith("```")) {
+    cleanContent = cleanContent.substring(3);
+  }
+  if (cleanContent.endsWith("```")) {
+    cleanContent = cleanContent.substring(0, cleanContent.length - 3);
+  }
+  cleanContent = cleanContent.trim();
+
+  return JSON.parse(cleanContent);
+}
+
+async function translateWithAnthropic(
+  apiKey: string,
+  systemInstruction: string,
+  batchPayload: Record<string, string>
+): Promise<Record<string, string>> {
+  const url = "https://api.anthropic.com/v1/messages";
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model: "claude-3-5-sonnet-20241022",
+      max_tokens: 4000,
+      system: systemInstruction + "\nOutput ONLY valid raw JSON without any markdown fences or explanations.",
+      messages: [
+        { role: "user", content: JSON.stringify(batchPayload) }
+      ]
+    })
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Anthropic API returned status ${res.status}: ${text}`);
+  }
+
+  const data = await res.json();
+  const content = data.content?.[0]?.text?.trim();
+  if (!content) {
+    throw new Error("La respuesta de Anthropic está vacía.");
+  }
+
+  let cleanContent = content;
+  if (cleanContent.startsWith("```json")) {
+    cleanContent = cleanContent.substring(7);
+  } else if (cleanContent.startsWith("```")) {
+    cleanContent = cleanContent.substring(3);
+  }
+  if (cleanContent.endsWith("```")) {
+    cleanContent = cleanContent.substring(0, cleanContent.length - 3);
+  }
+  cleanContent = cleanContent.trim();
+
+  return JSON.parse(cleanContent);
+}
+
+// Translates a batch of strings using the configured API Engine
 async function translateBatch(
   batch: Record<string, string>,
   glossary: Record<string, string>,
   targetLangName: string,
+  options: TranslationOptions,
   logFn: (msg: string) => void
 ): Promise<Record<string, string>> {
   const keys = Object.keys(batch);
   if (keys.length === 0) return {};
 
-  try {
-    const ai = getAi();
-    
-    // Build the glossary text to instruct Gemini
-    const glossaryText = Object.entries(glossary)
-      .map(([en, es]) => `- "${en}" -> "${es}"`)
-      .join("\n");
+  const engine = options.apiEngine || "gemini";
+  const customKeys = options.customApiKeys || {};
 
-    const systemInstruction = `You are a professional Minecraft Mod Translator specializing in Spanish translations.
+  // Build the glossary text to instruct models
+  const glossaryText = Object.entries(glossary)
+    .map(([en, es]) => `- "${en}" -> "${es}"`)
+    .join("\n");
+
+  const systemInstruction = `You are a professional Minecraft Mod Translator specializing in Spanish translations.
 Your task is to translate values from English to ${targetLangName}.
 
 STRICT RULES:
@@ -161,6 +311,133 @@ ${glossaryText}
 4. Translate only the human-readable text visible to players. Keep the tone natural, engaging, and faithful to standard Minecraft terminology (e.g. use "Mesa de trabajo" for Crafting Table, "Mundo Superior" for Overworld, etc.).
 5. You MUST return a JSON object with the exact same keys as the input. Do NOT omit any keys or alter their names. Output ONLY the valid JSON object.`;
 
+  try {
+    if (engine === "google_free") {
+      const finalResult: Record<string, string> = {};
+      const targetCode = targetLangName.toLowerCase().includes("mx") ? "es" : "es";
+      
+      await Promise.all(
+        keys.map(async (key) => {
+          const originalText = batch[key];
+          try {
+            let translated = await translateFreeGoogle(originalText, targetCode);
+            translated = cleanTranslationPunctuation(translated);
+            
+            // Post-apply glossary to enforce key words in free translate
+            for (const [enTerm, esTerm] of Object.entries(glossary)) {
+              const regex = new RegExp(`\\b${enTerm}\\b`, "gi");
+              translated = translated.replace(regex, esTerm);
+            }
+            finalResult[key] = translated;
+          } catch (e: any) {
+            logFn(`Advertencia: Falló Google gratis para "${originalText}". Usando original.`);
+            finalResult[key] = originalText;
+          }
+        })
+      );
+      return finalResult;
+    }
+
+    if (engine === "google_cloud") {
+      const apiKey = customKeys.google_cloud;
+      if (!apiKey) {
+        throw new Error("Clave API de Google Cloud Translation no configurada.");
+      }
+      
+      const batchArray = keys.map(k => batch[k]);
+      const url = `https://translation.googleapis.com/language/translate/v2?key=${apiKey}`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          q: batchArray,
+          target: "es",
+          source: "en",
+          format: "text"
+        })
+      });
+      
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Google Cloud API error (${response.status}): ${errText}`);
+      }
+      
+      const data = await response.json();
+      const translations = data?.data?.translations;
+      if (!translations || translations.length !== batchArray.length) {
+        throw new Error("La respuesta de Google Cloud está incompleta.");
+      }
+      
+      const finalResult: Record<string, string> = {};
+      keys.forEach((key, idx) => {
+        let translated = translations[idx].translatedText;
+        translated = cleanTranslationPunctuation(translated);
+        finalResult[key] = translated;
+      });
+      return finalResult;
+    }
+
+    if (engine === "openai") {
+      const apiKey = customKeys.openai;
+      if (!apiKey) throw new Error("Clave API de OpenAI no configurada.");
+      return await translateWithOpenAICompatible(
+        "https://api.openai.com/v1/chat/completions",
+        "gpt-4o-mini",
+        apiKey,
+        systemInstruction,
+        batch,
+        true
+      );
+    }
+
+    if (engine === "deepseek") {
+      const apiKey = customKeys.deepseek;
+      if (!apiKey) throw new Error("Clave API de DeepSeek no configurada.");
+      return await translateWithOpenAICompatible(
+        "https://api.deepseek.com/chat/completions",
+        "deepseek-chat",
+        apiKey,
+        systemInstruction,
+        batch,
+        true
+      );
+    }
+
+    if (engine === "groq") {
+      const apiKey = customKeys.groq;
+      if (!apiKey) throw new Error("Clave API de Groq no configurada.");
+      return await translateWithOpenAICompatible(
+        "https://api.groq.com/openapi/v1/chat/completions",
+        "llama-3.1-8b-instant",
+        apiKey,
+        systemInstruction,
+        batch,
+        true
+      );
+    }
+
+    if (engine === "openrouter") {
+      const apiKey = customKeys.openrouter;
+      if (!apiKey) throw new Error("Clave API de OpenRouter no configurada.");
+      return await translateWithOpenAICompatible(
+        "https://openrouter.ai/api/v1/chat/completions",
+        "google/gemini-2.5-flash",
+        apiKey,
+        systemInstruction,
+        batch,
+        false,
+        { "HTTP-Referer": "https://ai.studio/build" }
+      );
+    }
+
+    if (engine === "anthropic") {
+      const apiKey = customKeys.anthropic;
+      if (!apiKey) throw new Error("Clave API de Anthropic Claude no configurada.");
+      return await translateWithAnthropic(apiKey, systemInstruction, batch);
+    }
+
+    // Default to Gemini API
+    const ai = getAi();
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
       contents: JSON.stringify(batch),
@@ -181,19 +458,17 @@ ${glossaryText}
 
     const result = JSON.parse(text) as Record<string, string>;
     
-    // Verify all keys are present, fallback to original if missing
     const finalResult: Record<string, string> = {};
     for (const key of keys) {
       if (result[key] !== undefined) {
-        finalResult[key] = result[key];
+        finalResult[key] = cleanTranslationPunctuation(result[key]);
       } else {
-        finalResult[key] = batch[key]; // Fallback to original
+        finalResult[key] = batch[key];
       }
     }
     return finalResult;
   } catch (error: any) {
-    logFn(`Error en lote de traducción: ${error.message || error}`);
-    // Return original strings as fallback
+    logFn(`Error en lote de traducción con motor ${engine}: ${error.message || error}`);
     return batch;
   }
 }
@@ -297,20 +572,25 @@ export async function runTranslationTask(
         translatableEntries.push({ entry, type: "metadata", namespace: "global" });
         continue;
       }
+
+      // Category 7: Fallback general JSONs if translateAll is enabled
+      if (options.translateAll) {
+        if (entryPath.endsWith(".json") && !translatableEntries.some(e => e.entry.entryName === entryPath)) {
+          translatableEntries.push({ entry, type: "general_json", namespace: assetsMatch ? assetsMatch[1] : (dataMatch ? dataMatch[1] : "global") });
+          continue;
+        }
+      }
     }
 
     log(`Archivos detectados para traducción inteligente: ${translatableEntries.length}`);
     if (translatableEntries.length === 0) {
-      log("No se encontraron archivos de texto translicibles con las opciones seleccionadas.");
+      log("No se encontraron archivos de texto translicibles con las opciones seleccionadas. No es necesario realizar cambios.");
       task.status = "completed";
       task.progress = 100;
       task.stats.timeSpentMs = Date.now() - startTime;
-      
-      // Save original jar as output in case of no translatable content
-      const outPath = path.join(outputDir, task.translatedName);
-      fs.copyFileSync(originalFilePath, outPath);
-      task.downloadUrl = `/api/download/${task.id}`;
-      return outPath;
+      task.stats.filesTranslated = 0;
+      task.stats.filesIgnored = task.totalFiles;
+      return "";
     }
 
     // 3. Extract all plain-text values and map them to their files
@@ -324,16 +604,150 @@ export async function runTranslationTask(
       try {
         if (type === "lang_json") {
           const json = JSON.parse(content);
+          
+          // Check for existing target lang JSON files to perform gap-analysis & correction
+          const esEsPath = `assets/${namespace}/lang/es_es.json`;
+          const esMxPath = `assets/${namespace}/lang/es_mx.json`;
+          
+          let existingEsEs: Record<string, string> = {};
+          let existingEsMx: Record<string, string> = {};
+          
+          // Search for customized language file variants (like es__es.json, es-es.json, etc.)
+          const esEsPathsFound = new Set<string>([esEsPath]);
+          const esMxPathsFound = new Set<string>([esMxPath]);
+          
+          try {
+            const allEntries = zip.getEntries();
+            const langDir = `assets/${namespace}/lang/`.toLowerCase();
+            for (const entry of allEntries) {
+              if (entry.isDirectory) continue;
+              const entryPathLower = entry.entryName.toLowerCase();
+              if (entryPathLower.startsWith(langDir)) {
+                const base = path.basename(entryPathLower);
+                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.json") {
+                  esEsPathsFound.add(entry.entryName);
+                }
+                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
+                  esMxPathsFound.add(entry.entryName);
+                }
+              }
+            }
+          } catch (e) {}
+
+          for (const pathFound of esEsPathsFound) {
+            try {
+              const esEsEntry = zip.getEntry(pathFound);
+              if (esEsEntry) {
+                const parsed = JSON.parse(esEsEntry.getData().toString("utf-8"));
+                existingEsEs = { ...existingEsEs, ...parsed };
+              }
+            } catch (e) {}
+          }
+          
+          for (const pathFound of esMxPathsFound) {
+            try {
+              const esMxEntry = zip.getEntry(pathFound);
+              if (esMxEntry) {
+                const parsed = JSON.parse(esMxEntry.getData().toString("utf-8"));
+                existingEsMx = { ...existingEsMx, ...parsed };
+              }
+            } catch (e) {}
+          }
+          
           for (const key of Object.keys(json)) {
             const val = json[key];
-            if (typeof val === "string" && isTranslatableString(val)) {
-              textToTranslate.push({ fileIndex: i, path: entryPath, key, originalText: val });
+            if (typeof val === "string") {
+              let needsTranslateForEsEs = false;
+              let needsTranslateForEsMx = false;
+              
+              if (options.targetLocale === "es_es" || options.targetLocale === "both") {
+                const existingVal = existingEsEs[key];
+                // If it does not exist, or matches the English value (and is translatable), we need to translate it
+                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                  needsTranslateForEsEs = true;
+                }
+              }
+              
+              if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
+                const existingVal = existingEsMx[key];
+                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                  needsTranslateForEsMx = true;
+                }
+              }
+              
+              if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(val)) {
+                textToTranslate.push({ fileIndex: i, path: entryPath, key, originalText: val });
+              }
             }
           }
         } 
         else if (type === "lang_legacy") {
           // Flat key=value properties file
           const lines = content.split(/\r?\n/);
+          
+          // Check for existing target legacy flat files
+          const esEsPath = `assets/${namespace}/lang/es_es.lang`;
+          const esMxPath = `assets/${namespace}/lang/es_mx.lang`;
+          
+          let existingEsEsMap: Record<string, string> = {};
+          let existingEsMxMap: Record<string, string> = {};
+          
+          const parseLegacyLang = (fileContent: string) => {
+            const map: Record<string, string> = {};
+            const lines = fileContent.split(/\r?\n/);
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+              const eqIdx = trimmed.indexOf("=");
+              const key = trimmed.substring(0, eqIdx).trim();
+              const val = trimmed.substring(eqIdx + 1).trim();
+              map[key] = val;
+            }
+            return map;
+          };
+
+          // Search for customized legacy language file variants (like es__es.lang, es-es.lang, etc.)
+          const esEsLangPathsFound = new Set<string>([esEsPath]);
+          const esMxLangPathsFound = new Set<string>([esMxPath]);
+          
+          try {
+            const allEntries = zip.getEntries();
+            const langDir = `assets/${namespace}/lang/`.toLowerCase();
+            for (const entry of allEntries) {
+              if (entry.isDirectory) continue;
+              const entryPathLower = entry.entryName.toLowerCase();
+              if (entryPathLower.startsWith(langDir)) {
+                const base = path.basename(entryPathLower);
+                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.lang") {
+                  esEsLangPathsFound.add(entry.entryName);
+                }
+                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
+                  esMxLangPathsFound.add(entry.entryName);
+                }
+              }
+            }
+          } catch (e) {}
+
+          for (const pathFound of esEsLangPathsFound) {
+            try {
+              const entry = zip.getEntry(pathFound);
+              if (entry) {
+                const parsed = parseLegacyLang(entry.getData().toString("utf-8"));
+                existingEsEsMap = { ...existingEsEsMap, ...parsed };
+              }
+            } catch (e) {}
+          }
+          
+          for (const pathFound of esMxLangPathsFound) {
+            try {
+              const entry = zip.getEntry(pathFound);
+              if (entry) {
+                const parsed = parseLegacyLang(entry.getData().toString("utf-8"));
+                existingEsMxMap = { ...existingEsMxMap, ...parsed };
+              }
+            } catch (e) {}
+          }
+          
           for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
             const line = lines[lineIdx].trim();
             if (!line || line.startsWith("#") || !line.includes("=")) continue;
@@ -343,7 +757,26 @@ export async function runTranslationTask(
             const val = line.substring(eqIdx + 1).trim();
             
             if (isTranslatableString(val)) {
-              textToTranslate.push({ fileIndex: i, path: entryPath, key: `${lineIdx}::${key}`, originalText: val });
+              let needsTranslateForEsEs = false;
+              let needsTranslateForEsMx = false;
+              
+              if (options.targetLocale === "es_es" || options.targetLocale === "both") {
+                const existingVal = existingEsEsMap[key];
+                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                  needsTranslateForEsEs = true;
+                }
+              }
+              
+              if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
+                const existingVal = existingEsMxMap[key];
+                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                  needsTranslateForEsMx = true;
+                }
+              }
+              
+              if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(val)) {
+                textToTranslate.push({ fileIndex: i, path: entryPath, key: `${lineIdx}::${key}`, originalText: val });
+              }
             }
           }
         } 
@@ -427,6 +860,15 @@ export async function runTranslationTask(
     }
 
     log(`Total de cadenas candidatas encontradas: ${textToTranslate.length}`);
+    if (textToTranslate.length === 0) {
+      log("¡El mod ya se encuentra completamente traducido al idioma deseado! No es necesario realizar cambios.");
+      task.status = "completed";
+      task.progress = 100;
+      task.stats.timeSpentMs = Date.now() - startTime;
+      task.stats.filesTranslated = 0;
+      task.stats.filesIgnored = task.totalFiles;
+      return "";
+    }
     
     // 4. Filter with Translation Memory (TM) & Glossary exact matches
     const stringsToTranslateFromGemini: typeof textToTranslate = [];
@@ -483,7 +925,7 @@ export async function runTranslationTask(
 
       log(`Traduciendo lote ${Math.floor(offset / batchSize) + 1} de ${Math.ceil(stringsToTranslateFromGemini.length / batchSize)} (Tamaño: ${currentBatchItems.length})...`);
       
-      const batchResult = await translateBatch(batchPayload, glossary, targetLangName, log);
+      const batchResult = await translateBatch(batchPayload, glossary, targetLangName, options, log);
       
       // Save results to translation cache and memory
       currentBatchItems.forEach((item, idx) => {
@@ -524,107 +966,309 @@ export async function runTranslationTask(
       const entryPath = entry.entryName;
       const originalContent = entry.getData().toString("utf-8");
 
-      let updatedContent = "";
-
       try {
         if (type === "lang_json") {
-          // For lang json, we can merge with any existing Spanish translation, or create a brand new one
+          // For lang json, we merge with any existing Spanish translation or create a brand new one
           const json = JSON.parse(originalContent);
-          const translatedJson = { ...json };
+          
+          const esEsPath = `assets/${namespace}/lang/es_es.json`;
+          const esMxPath = `assets/${namespace}/lang/es_mx.json`;
+          
+          let existingEsEs: Record<string, string> = {};
+          let existingEsMx: Record<string, string> = {};
+          
+          // Search for customized language file variants (like es__es.json, es-es.json, etc.)
+          const esEsPathsFound = new Set<string>([esEsPath]);
+          const esMxPathsFound = new Set<string>([esMxPath]);
+          
+          try {
+            const allEntries = zip.getEntries();
+            const langDir = `assets/${namespace}/lang/`.toLowerCase();
+            for (const entry of allEntries) {
+              if (entry.isDirectory) continue;
+              const entryPathLower = entry.entryName.toLowerCase();
+              if (entryPathLower.startsWith(langDir)) {
+                const base = path.basename(entryPathLower);
+                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.json") {
+                  esEsPathsFound.add(entry.entryName);
+                }
+                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
+                  esMxPathsFound.add(entry.entryName);
+                }
+              }
+            }
+          } catch (e) {}
 
-          for (const item of items) {
-            const translated = localTranslationCache[item.originalText];
-            if (translated) {
-              translatedJson[item.key] = translated;
+          for (const pathFound of esEsPathsFound) {
+            try {
+              const esEsEntry = zip.getEntry(pathFound);
+              if (esEsEntry) {
+                const parsed = JSON.parse(esEsEntry.getData().toString("utf-8"));
+                existingEsEs = { ...existingEsEs, ...parsed };
+              }
+            } catch (e) {}
+          }
+          
+          for (const pathFound of esMxPathsFound) {
+            try {
+              const esMxEntry = zip.getEntry(pathFound);
+              if (esMxEntry) {
+                const parsed = JSON.parse(esMxEntry.getData().toString("utf-8"));
+                existingEsMx = { ...existingEsMx, ...parsed };
+              }
+            } catch (e) {}
+          }
+
+          const finalEsEs = { ...existingEsEs };
+          const finalEsMx = { ...existingEsMx };
+          
+          let esEsChanged = false;
+          let esMxChanged = false;
+          
+          // For every key in the English json, merge translation
+          for (const key of Object.keys(json)) {
+            const englishVal = json[key];
+            const translated = localTranslationCache[englishVal];
+            
+            if (options.targetLocale === "es_es" || options.targetLocale === "both") {
+              const currentEsEs = finalEsEs[key];
+              if (!currentEsEs || (currentEsEs === englishVal && isTranslatableString(englishVal))) {
+                const newVal = translated || englishVal;
+                if (currentEsEs !== newVal) {
+                  finalEsEs[key] = newVal;
+                  esEsChanged = true;
+                }
+              }
+            }
+            
+            if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
+              const currentEsMx = finalEsMx[key];
+              if (!currentEsMx || (currentEsMx === englishVal && isTranslatableString(englishVal))) {
+                const newVal = translated || englishVal;
+                if (currentEsMx !== newVal) {
+                  finalEsMx[key] = newVal;
+                  esMxChanged = true;
+                }
+              }
             }
           }
-
-          const finalJsonStr = JSON.stringify(translatedJson, null, 2);
           
-          // Write Spanish variants as requested
+          // If we had existing files and didn't change anything, we don't write them. But if they didn't exist, we must write them.
           if (options.targetLocale === "es_es" || options.targetLocale === "both") {
-            const esEsPath = `assets/${namespace}/lang/es_es.json`;
-            zip.addFile(esEsPath, Buffer.from(finalJsonStr, "utf-8"));
-            log(`Guardado: ${esEsPath}`);
+            for (const pathFound of esEsPathsFound) {
+              const exists = zip.getEntry(pathFound) !== null;
+              if (!exists || esEsChanged) {
+                const finalJsonStr = JSON.stringify(finalEsEs, null, 2);
+                addOrReplaceFile(zip, pathFound, Buffer.from(finalJsonStr, "utf-8"));
+                log(`Guardado (fusionado): ${pathFound}`);
+                task.stats.filesTranslated++;
+              }
+            }
           }
+          
           if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
-            const esMxPath = `assets/${namespace}/lang/es_mx.json`;
-            zip.addFile(esMxPath, Buffer.from(finalJsonStr, "utf-8"));
-            log(`Guardado: ${esMxPath}`);
+            for (const pathFound of esMxPathsFound) {
+              const exists = zip.getEntry(pathFound) !== null;
+              if (!exists || esMxChanged) {
+                const finalJsonStr = JSON.stringify(finalEsMx, null, 2);
+                addOrReplaceFile(zip, pathFound, Buffer.from(finalJsonStr, "utf-8"));
+                log(`Guardado (fusionado): ${pathFound}`);
+                task.stats.filesTranslated++;
+              }
+            }
           }
-          task.stats.filesTranslated++;
           continue;
         } 
         
         if (type === "lang_legacy") {
-          // For old flat files, translate lines and output
+          // Flat key=value properties file
           const lines = originalContent.split(/\r?\n/);
-          const translatedLines = [...lines];
+          
+          const esEsPath = `assets/${namespace}/lang/es_es.lang`;
+          const esMxPath = `assets/${namespace}/lang/es_mx.lang`;
+          
+          let existingEsEsMap: Record<string, string> = {};
+          let existingEsMxMap: Record<string, string> = {};
+          
+          const parseLegacyLang = (fileContent: string) => {
+            const map: Record<string, string> = {};
+            const lines = fileContent.split(/\r?\n/);
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+              const eqIdx = trimmed.indexOf("=");
+              const key = trimmed.substring(0, eqIdx).trim();
+              const val = trimmed.substring(eqIdx + 1).trim();
+              map[key] = val;
+            }
+            return map;
+          };
 
-          for (const item of items) {
-            const translated = localTranslationCache[item.originalText];
-            if (translated) {
-              const lineIdx = parseInt(item.key.split("::")[0]);
-              const keyName = item.key.substring(item.key.indexOf("::") + 2);
-              translatedLines[lineIdx] = `${keyName}=${translated}`;
+          // Search for customized legacy language file variants (like es__es.lang, es-es.lang, etc.)
+          const esEsLangPathsFound = new Set<string>([esEsPath]);
+          const esMxLangPathsFound = new Set<string>([esMxPath]);
+          
+          try {
+            const allEntries = zip.getEntries();
+            const langDir = `assets/${namespace}/lang/`.toLowerCase();
+            for (const entry of allEntries) {
+              if (entry.isDirectory) continue;
+              const entryPathLower = entry.entryName.toLowerCase();
+              if (entryPathLower.startsWith(langDir)) {
+                const base = path.basename(entryPathLower);
+                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.lang") {
+                  esEsLangPathsFound.add(entry.entryName);
+                }
+                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
+                  esMxLangPathsFound.add(entry.entryName);
+                }
+              }
+            }
+          } catch (e) {}
+
+          for (const pathFound of esEsLangPathsFound) {
+            try {
+              const entry = zip.getEntry(pathFound);
+              if (entry) {
+                const parsed = parseLegacyLang(entry.getData().toString("utf-8"));
+                existingEsEsMap = { ...existingEsEsMap, ...parsed };
+              }
+            } catch (e) {}
+          }
+          
+          for (const pathFound of esMxLangPathsFound) {
+            try {
+              const entry = zip.getEntry(pathFound);
+              if (entry) {
+                const parsed = parseLegacyLang(entry.getData().toString("utf-8"));
+                existingEsMxMap = { ...existingEsMxMap, ...parsed };
+              }
+            } catch (e) {}
+          }
+          
+          const buildMergedLegacyLines = (existingMap: Record<string, string>, targetLocale: string, changedRef: { changed: boolean }) => {
+            const outputLines: string[] = [];
+            for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+              const line = lines[lineIdx];
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) {
+                outputLines.push(line);
+                continue;
+              }
+              const eqIdx = line.indexOf("=");
+              const key = line.substring(0, eqIdx).trim();
+              const val = line.substring(eqIdx + 1).trim();
+              
+              const currentExisting = existingMap[key];
+              if (currentExisting && !(currentExisting === val && isTranslatableString(val))) {
+                outputLines.push(`${key}=${currentExisting}`);
+              } else {
+                const translated = localTranslationCache[val];
+                if (translated && translated !== val) {
+                  outputLines.push(`${key}=${translated}`);
+                  changedRef.changed = true;
+                } else {
+                  outputLines.push(`${key}=${val}`);
+                }
+              }
+            }
+            return outputLines.join("\n");
+          };
+          
+          if (options.targetLocale === "es_es" || options.targetLocale === "both") {
+            const changedObj = { changed: false };
+            const finalLangStr = buildMergedLegacyLines(existingEsEsMap, "es_es", changedObj);
+            for (const pathFound of esEsLangPathsFound) {
+              const exists = zip.getEntry(pathFound) !== null;
+              if (!exists || changedObj.changed) {
+                addOrReplaceFile(zip, pathFound, Buffer.from(finalLangStr, "utf-8"));
+                log(`Guardado (fusionado): ${pathFound}`);
+                task.stats.filesTranslated++;
+              }
             }
           }
-
-          const finalLangStr = translatedLines.join("\n");
-          if (options.targetLocale === "es_es" || options.targetLocale === "both") {
-            const esEsPath = `assets/${namespace}/lang/es_es.lang`;
-            zip.addFile(esEsPath, Buffer.from(finalLangStr, "utf-8"));
-          }
+          
           if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
-            const esMxPath = `assets/${namespace}/lang/es_mx.lang`;
-            zip.addFile(esMxPath, Buffer.from(finalLangStr, "utf-8"));
+            const changedObj = { changed: false };
+            const finalLangStr = buildMergedLegacyLines(existingEsMxMap, "es_mx", changedObj);
+            for (const pathFound of esMxLangPathsFound) {
+              const exists = zip.getEntry(pathFound) !== null;
+              if (!exists || changedObj.changed) {
+                addOrReplaceFile(zip, pathFound, Buffer.from(finalLangStr, "utf-8"));
+                log(`Guardado (fusionado): ${pathFound}`);
+                task.stats.filesTranslated++;
+              }
+            }
           }
-          task.stats.filesTranslated++;
           continue;
         }
 
         if (type === "metadata") {
+          let hasChanged = false;
           if (entryPath === "fabric.mod.json") {
             const json = JSON.parse(originalContent);
             for (const item of items) {
               const trans = localTranslationCache[item.originalText];
-              if (trans) {
-                if (item.key === "name") json.name = trans;
-                if (item.key === "description") json.description = trans;
+              if (trans && trans !== item.originalText) {
+                if (item.key === "name" && json.name !== trans) {
+                  json.name = trans;
+                  hasChanged = true;
+                }
+                if (item.key === "description" && json.description !== trans) {
+                  json.description = trans;
+                  hasChanged = true;
+                }
               }
             }
-            zip.addFile(entryPath, Buffer.from(JSON.stringify(json, null, 2), "utf-8"));
+            if (hasChanged) {
+              addOrReplaceFile(zip, entryPath, Buffer.from(JSON.stringify(json, null, 2), "utf-8"));
+              task.stats.filesTranslated++;
+              log(`Guardado: ${entryPath}`);
+            }
           } 
           else if (entryPath === "pack.mcmeta") {
             const json = JSON.parse(originalContent);
             for (const item of items) {
               const trans = localTranslationCache[item.originalText];
-              if (trans && item.key === "pack.description" && json.pack) {
+              if (trans && item.key === "pack.description" && json.pack && json.pack.description !== trans) {
                 json.pack.description = trans;
+                hasChanged = true;
               }
             }
-            zip.addFile(entryPath, Buffer.from(JSON.stringify(json, null, 2), "utf-8"));
+            if (hasChanged) {
+              addOrReplaceFile(zip, entryPath, Buffer.from(JSON.stringify(json, null, 2), "utf-8"));
+              task.stats.filesTranslated++;
+              log(`Guardado: ${entryPath}`);
+            }
           } 
           else if (entryPath === "META-INF/mods.toml") {
             const lines = originalContent.split(/\r?\n/);
             for (const item of items) {
               const trans = localTranslationCache[item.originalText];
-              if (trans) {
+              if (trans && trans !== item.originalText) {
                 const lineIdx = parseInt(item.key.split("::")[0]);
                 const originalLine = lines[lineIdx];
                 const eqIdx = originalLine.indexOf("=");
                 const key = originalLine.substring(0, eqIdx).trim();
-                lines[lineIdx] = `${key} = "${trans}"`;
+                const currentValLine = `${key} = "${trans}"`;
+                if (lines[lineIdx] !== currentValLine) {
+                  lines[lineIdx] = currentValLine;
+                  hasChanged = true;
+                }
               }
             }
-            zip.addFile(entryPath, Buffer.from(lines.join("\n"), "utf-8"));
+            if (hasChanged) {
+              addOrReplaceFile(zip, entryPath, Buffer.from(lines.join("\n"), "utf-8"));
+              task.stats.filesTranslated++;
+              log(`Guardado: ${entryPath}`);
+            }
           }
-          task.stats.filesTranslated++;
           continue;
         }
 
         // General books, advancements, or datapacks: edit JSON structure recursively
         const json = JSON.parse(originalContent);
+        let hasChanged = false;
         
         const applyJsonTranslations = (node: any, jsonPath: string): any => {
           if (node === null || node === undefined) return node;
@@ -633,7 +1277,10 @@ export async function runTranslationTask(
             const targetItem = items.find(it => it.key === jsonPath);
             if (targetItem) {
               const trans = localTranslationCache[node];
-              if (trans) return trans;
+              if (trans && trans !== node) {
+                hasChanged = true;
+                return trans;
+              }
             }
             return node;
           }
@@ -654,14 +1301,35 @@ export async function runTranslationTask(
         };
 
         const translatedJsonStructure = applyJsonTranslations(json, "");
-        zip.addFile(entryPath, Buffer.from(JSON.stringify(translatedJsonStructure, null, 2), "utf-8"));
-        task.stats.filesTranslated++;
+        if (hasChanged) {
+          addOrReplaceFile(zip, entryPath, Buffer.from(JSON.stringify(translatedJsonStructure, null, 2), "utf-8"));
+          task.stats.filesTranslated++;
+          log(`Guardado: ${entryPath}`);
+        } else {
+          log(`Sin cambios reales para: ${entryPath}`);
+        }
 
       } catch (err: any) {
         log(`Error al inyectar traducciones en ${entryPath}: ${err.message}`);
         task.stats.errorsCount++;
       }
     }
+
+    // Build the translation diff array of modified fields
+    const taskDiff: TranslationDiffEntry[] = [];
+    for (const item of textToTranslate) {
+      const orig = item.originalText;
+      const trans = localTranslationCache[orig];
+      if (trans && trans !== orig) {
+        taskDiff.push({
+          path: item.path,
+          key: item.key,
+          original: orig,
+          translated: trans
+        });
+      }
+    }
+    task.diff = taskDiff;
 
     // Save localized JAR to the final folder
     const outputFilePath = path.join(outputDir, task.translatedName);
@@ -685,4 +1353,572 @@ export async function runTranslationTask(
     log(`ERROR FATAL durante el proceso de traducción: ${err.message || err}`);
     throw err;
   }
+}
+
+export interface AnalysisFileReport {
+  path: string;
+  type: string;
+  totalKeys: number;
+  translatedKeys: number;
+  missingKeys: number;
+  unmodifiedKeys: number;
+  totalWords: number;
+  totalCharacters: number;
+  wordsToTranslate: number;
+  charactersToTranslate: number;
+}
+
+export interface AnalysisResult {
+  originalName: string;
+  totalFiles: number;
+  translatableFilesCount: number;
+  totalOriginalKeys: number;
+  totalAlreadyTranslatedKeys: number;
+  totalMissingKeys: number;
+  totalUnmodifiedKeys: number;
+  totalWords: number;
+  totalCharacters: number;
+  wordsToTranslate: number;
+  charactersToTranslate: number;
+  estimatedApiSavingsPercent: number;
+  files: AnalysisFileReport[];
+}
+
+export async function analyzeModFile(
+  originalFilePath: string,
+  options: TranslationOptions
+): Promise<AnalysisResult> {
+  const zip = new AdmZip(originalFilePath);
+  const entries = zip.getEntries();
+  const originalName = path.basename(originalFilePath);
+  const glossary = { ...DEFAULT_GLOSSARY, ...options.customGlossary };
+
+  // 1. Identify translatable files
+  const translatableEntries: { entry: any; type: string; namespace: string }[] = [];
+  for (const entry of entries) {
+    const entryPath = entry.entryName;
+    if (entry.isDirectory || entryPath.endsWith(".class")) continue;
+
+    const assetsMatch = entryPath.match(/^assets\/([a-zA-Z0-9_-]+)\/(.+)$/);
+    const dataMatch = entryPath.match(/^data\/([a-zA-Z0-9_-]+)\/(.+)$/);
+
+    if (options.translateLang || options.translateAll) {
+      if (assetsMatch && assetsMatch[2].startsWith("lang/") && assetsMatch[2].endsWith(".json")) {
+        if (assetsMatch[2] === "lang/en_us.json" || assetsMatch[2].includes("en_")) {
+          translatableEntries.push({ entry, type: "lang_json", namespace: assetsMatch[1] });
+          continue;
+        }
+      }
+      if (assetsMatch && assetsMatch[2].startsWith("lang/") && assetsMatch[2].endsWith(".lang")) {
+        if (assetsMatch[2] === "lang/en_us.lang" || assetsMatch[2].includes("en_")) {
+          translatableEntries.push({ entry, type: "lang_legacy", namespace: assetsMatch[1] });
+          continue;
+        }
+      }
+    }
+
+    if (options.translateBooks || options.translateAll) {
+      if (assetsMatch && assetsMatch[2].startsWith("patchouli_books/") && assetsMatch[2].endsWith(".json")) {
+        translatableEntries.push({ entry, type: "patchouli", namespace: assetsMatch[1] });
+        continue;
+      }
+    }
+
+    if (options.translateQuests || options.translateAll) {
+      if (dataMatch && dataMatch[2].startsWith("advancements/") && dataMatch[2].endsWith(".json")) {
+        translatableEntries.push({ entry, type: "advancement", namespace: dataMatch[1] });
+        continue;
+      }
+    }
+
+    if (options.translateDatapacks || options.translateAll) {
+      if (dataMatch && (dataMatch[2].startsWith("loot_tables/") || dataMatch[2].startsWith("recipes/")) && dataMatch[2].endsWith(".json")) {
+        translatableEntries.push({ entry, type: "datapack_json", namespace: dataMatch[1] });
+        continue;
+      }
+    }
+
+    if (options.translateStructures || options.translateAll) {
+      if (dataMatch && (dataMatch[2].startsWith("structures/") || dataMatch[2].startsWith("dialogs/") || dataMatch[2].startsWith("quests/")) && (dataMatch[2].endsWith(".json") || dataMatch[2].endsWith(".snbt"))) {
+        translatableEntries.push({ entry, type: "structure_json", namespace: dataMatch[1] });
+        continue;
+      }
+    }
+
+    if (entryPath === "META-INF/mods.toml" || entryPath === "fabric.mod.json" || entryPath === "pack.mcmeta") {
+      translatableEntries.push({ entry, type: "metadata", namespace: "global" });
+      continue;
+    }
+
+    if (options.translateAll) {
+      if (entryPath.endsWith(".json") && !translatableEntries.some(e => e.entry.entryName === entryPath)) {
+        translatableEntries.push({ entry, type: "general_json", namespace: assetsMatch ? assetsMatch[1] : (dataMatch ? dataMatch[1] : "global") });
+        continue;
+      }
+    }
+  }
+
+  const fileReports: AnalysisFileReport[] = [];
+
+  for (const { entry, type, namespace } of translatableEntries) {
+    const entryPath = entry.entryName;
+    const content = entry.getData().toString("utf-8");
+
+    let totalKeys = 0;
+    let translatedKeys = 0;
+    let missingKeys = 0;
+    let unmodifiedKeys = 0;
+    let totalWords = 0;
+    let totalCharacters = 0;
+    let wordsToTranslate = 0;
+    let charactersToTranslate = 0;
+
+    try {
+      if (type === "lang_json") {
+        const json = JSON.parse(content);
+        const esEsPath = `assets/${namespace}/lang/es_es.json`;
+        const esMxPath = `assets/${namespace}/lang/es_mx.json`;
+
+        let existingEsEs: Record<string, string> = {};
+        let existingEsMx: Record<string, string> = {};
+
+        const esEsPathsFound = new Set<string>([esEsPath]);
+        const esMxPathsFound = new Set<string>([esMxPath]);
+
+        try {
+          const langDir = `assets/${namespace}/lang/`.toLowerCase();
+          for (const ent of entries) {
+            if (ent.isDirectory) continue;
+            const entPathLower = ent.entryName.toLowerCase();
+            if (entPathLower.startsWith(langDir)) {
+              const base = path.basename(entPathLower);
+              if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.json") {
+                esEsPathsFound.add(ent.entryName);
+              }
+              if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
+                esMxPathsFound.add(ent.entryName);
+              }
+            }
+          }
+        } catch (e) {}
+
+        for (const pathFound of esEsPathsFound) {
+          try {
+            const esEsEntry = zip.getEntry(pathFound);
+            if (esEsEntry) {
+              const parsed = JSON.parse(esEsEntry.getData().toString("utf-8"));
+              existingEsEs = { ...existingEsEs, ...parsed };
+            }
+          } catch (e) {}
+        }
+
+        for (const pathFound of esMxPathsFound) {
+          try {
+            const esMxEntry = zip.getEntry(pathFound);
+            if (esMxEntry) {
+              const parsed = JSON.parse(esMxEntry.getData().toString("utf-8"));
+              existingEsMx = { ...existingEsMx, ...parsed };
+            }
+          } catch (e) {}
+        }
+
+        for (const key of Object.keys(json)) {
+          const val = json[key];
+          if (typeof val === "string") {
+            totalKeys++;
+            const charCount = val.length;
+            const wordCount = val.trim().split(/\s+/).filter(Boolean).length;
+            totalCharacters += charCount;
+            totalWords += wordCount;
+
+            let needsTranslateForEsEs = false;
+            let needsTranslateForEsMx = false;
+
+            let hasEsEs = false;
+            let isEsEsIdentical = false;
+            if (options.targetLocale === "es_es" || options.targetLocale === "both") {
+              const existingVal = existingEsEs[key];
+              if (existingVal) {
+                hasEsEs = true;
+                if (existingVal === val && isTranslatableString(val)) {
+                  isEsEsIdentical = true;
+                  needsTranslateForEsEs = true;
+                }
+              } else {
+                needsTranslateForEsEs = true;
+              }
+            }
+
+            let hasEsMx = false;
+            let isEsMxIdentical = false;
+            if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
+              const existingVal = existingEsMx[key];
+              if (existingVal) {
+                hasEsMx = true;
+                if (existingVal === val && isTranslatableString(val)) {
+                  isEsMxIdentical = true;
+                  needsTranslateForEsMx = true;
+                }
+              } else {
+                needsTranslateForEsMx = true;
+              }
+            }
+
+            // Categorize
+            if (options.targetLocale === "both") {
+              if (hasEsEs && hasEsMx) {
+                if (isEsEsIdentical || isEsMxIdentical) unmodifiedKeys++;
+                else translatedKeys++;
+              } else if (!hasEsEs && !hasEsMx) {
+                missingKeys++;
+              } else {
+                if (isEsEsIdentical || isEsMxIdentical) unmodifiedKeys++;
+                else translatedKeys++;
+              }
+            } else if (options.targetLocale === "es_es") {
+              if (hasEsEs) {
+                if (isEsEsIdentical) unmodifiedKeys++;
+                else translatedKeys++;
+              } else {
+                missingKeys++;
+              }
+            } else { // es_mx
+              if (hasEsMx) {
+                if (isEsMxIdentical) unmodifiedKeys++;
+                else translatedKeys++;
+              } else {
+                missingKeys++;
+              }
+            }
+
+            if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(val)) {
+              if (glossary[val] || globalTranslationMemory[val]) {
+                translatedKeys++;
+                if (missingKeys > 0) missingKeys--;
+                else if (unmodifiedKeys > 0) unmodifiedKeys--;
+              } else {
+                wordsToTranslate += wordCount;
+                charactersToTranslate += charCount;
+              }
+            }
+          }
+        }
+      } else if (type === "lang_legacy") {
+        const lines = content.split(/\r?\n/);
+        const esEsPath = `assets/${namespace}/lang/es_es.lang`;
+        const esMxPath = `assets/${namespace}/lang/es_mx.lang`;
+
+        let existingEsEsMap: Record<string, string> = {};
+        let existingEsMxMap: Record<string, string> = {};
+
+        const esEsLangPathsFound = new Set<string>([esEsPath]);
+        const esMxLangPathsFound = new Set<string>([esMxPath]);
+
+        try {
+          const langDir = `assets/${namespace}/lang/`.toLowerCase();
+          for (const ent of entries) {
+            if (ent.isDirectory) continue;
+            const entPathLower = ent.entryName.toLowerCase();
+            if (entPathLower.startsWith(langDir)) {
+              const base = path.basename(entPathLower);
+              if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.lang") {
+                esEsLangPathsFound.add(ent.entryName);
+              }
+              if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
+                esMxLangPathsFound.add(ent.entryName);
+              }
+            }
+          }
+        } catch (e) {}
+
+        const parseLegacyLang = (fileContent: string) => {
+          const map: Record<string, string> = {};
+          const lines = fileContent.split(/\r?\n/);
+          for (const l of lines) {
+            const trimmed = l.trim();
+            if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+            const eqIdx = trimmed.indexOf("=");
+            const key = trimmed.substring(0, eqIdx).trim();
+            const val = trimmed.substring(eqIdx + 1).trim();
+            map[key] = val;
+          }
+          return map;
+        };
+
+        for (const pathFound of esEsLangPathsFound) {
+          try {
+            const entryFile = zip.getEntry(pathFound);
+            if (entryFile) {
+              const parsed = parseLegacyLang(entryFile.getData().toString("utf-8"));
+              existingEsEsMap = { ...existingEsEsMap, ...parsed };
+            }
+          } catch (e) {}
+        }
+
+        for (const pathFound of esMxLangPathsFound) {
+          try {
+            const entryFile = zip.getEntry(pathFound);
+            if (entryFile) {
+              const parsed = parseLegacyLang(entryFile.getData().toString("utf-8"));
+              existingEsMxMap = { ...existingEsMxMap, ...parsed };
+            }
+          } catch (e) {}
+        }
+
+        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+          const line = lines[lineIdx].trim();
+          if (!line || line.startsWith("#") || !line.includes("=")) continue;
+
+          const eqIdx = line.indexOf("=");
+          const key = line.substring(0, eqIdx).trim();
+          const val = line.substring(eqIdx + 1).trim();
+
+          totalKeys++;
+          const charCount = val.length;
+          const wordCount = val.trim().split(/\s+/).filter(Boolean).length;
+          totalCharacters += charCount;
+          totalWords += wordCount;
+
+          let needsTranslateForEsEs = false;
+          let needsTranslateForEsMx = false;
+
+          let hasEsEs = false;
+          let isEsEsIdentical = false;
+          if (options.targetLocale === "es_es" || options.targetLocale === "both") {
+            const existingVal = existingEsEsMap[key];
+            if (existingVal) {
+              hasEsEs = true;
+              if (existingVal === val && isTranslatableString(val)) {
+                isEsEsIdentical = true;
+                needsTranslateForEsEs = true;
+              }
+            } else {
+              needsTranslateForEsEs = true;
+            }
+          }
+
+          let hasEsMx = false;
+          let isEsMxIdentical = false;
+          if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
+            const existingVal = existingEsMxMap[key];
+            if (existingVal) {
+              hasEsMx = true;
+              if (existingVal === val && isTranslatableString(val)) {
+                isEsMxIdentical = true;
+                needsTranslateForEsMx = true;
+              }
+            } else {
+              needsTranslateForEsMx = true;
+            }
+          }
+
+          if (options.targetLocale === "both") {
+            if (hasEsEs && hasEsMx) {
+              if (isEsEsIdentical || isEsMxIdentical) unmodifiedKeys++;
+              else translatedKeys++;
+            } else if (!hasEsEs && !hasEsMx) {
+              missingKeys++;
+            } else {
+              if (isEsEsIdentical || isEsMxIdentical) unmodifiedKeys++;
+              else translatedKeys++;
+            }
+          } else if (options.targetLocale === "es_es") {
+            if (hasEsEs) {
+              if (isEsEsIdentical) unmodifiedKeys++;
+              else translatedKeys++;
+            } else {
+              missingKeys++;
+            }
+          } else {
+            if (hasEsMx) {
+              if (isEsMxIdentical) unmodifiedKeys++;
+              else translatedKeys++;
+            } else {
+              missingKeys++;
+            }
+          }
+
+          if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(val)) {
+            if (glossary[val] || globalTranslationMemory[val]) {
+              translatedKeys++;
+              if (missingKeys > 0) missingKeys--;
+              else if (unmodifiedKeys > 0) unmodifiedKeys--;
+            } else {
+              wordsToTranslate += wordCount;
+              charactersToTranslate += charCount;
+            }
+          }
+        }
+      } else if (type === "metadata") {
+        if (entryPath === "fabric.mod.json") {
+          const json = JSON.parse(content);
+          const candidateKeys = ["name", "description"];
+          for (const k of candidateKeys) {
+            const val = json[k];
+            if (val && isTranslatableString(val)) {
+              totalKeys++;
+              const charCount = val.length;
+              const wordCount = val.trim().split(/\s+/).filter(Boolean).length;
+              totalCharacters += charCount;
+              totalWords += wordCount;
+
+              if (glossary[val] || globalTranslationMemory[val]) {
+                translatedKeys++;
+              } else {
+                missingKeys++;
+                wordsToTranslate += wordCount;
+                charactersToTranslate += charCount;
+              }
+            }
+          }
+        } else if (entryPath === "pack.mcmeta") {
+          const json = JSON.parse(content);
+          const val = json.pack?.description;
+          if (val && isTranslatableString(val)) {
+            totalKeys++;
+            const charCount = val.length;
+            const wordCount = val.trim().split(/\s+/).filter(Boolean).length;
+            totalCharacters += charCount;
+            totalWords += wordCount;
+
+            if (glossary[val] || globalTranslationMemory[val]) {
+              translatedKeys++;
+            } else {
+              missingKeys++;
+              wordsToTranslate += wordCount;
+              charactersToTranslate += charCount;
+            }
+          }
+        } else if (entryPath === "META-INF/mods.toml") {
+          const lines = content.split(/\r?\n/);
+          for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+            const line = lines[lineIdx].trim();
+            if (line.startsWith("displayName") || line.startsWith("description")) {
+              const eqIdx = line.indexOf("=");
+              if (eqIdx !== -1) {
+                let val = line.substring(eqIdx + 1).trim();
+                if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                  val = val.substring(1, val.length - 1);
+                }
+                if (isTranslatableString(val)) {
+                  totalKeys++;
+                  const charCount = val.length;
+                  const wordCount = val.trim().split(/\s+/).filter(Boolean).length;
+                  totalCharacters += charCount;
+                  totalWords += wordCount;
+
+                  if (glossary[val] || globalTranslationMemory[val]) {
+                    translatedKeys++;
+                  } else {
+                    missingKeys++;
+                    wordsToTranslate += wordCount;
+                    charactersToTranslate += charCount;
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else {
+        // General json, patchouli books, loot tables, advancements etc.
+        const json = JSON.parse(content);
+
+        const scanJsonNode = (node: any) => {
+          if (node === null || node === undefined) return;
+          if (typeof node === "string") {
+            if (isTranslatableString(node)) {
+              totalKeys++;
+              const charCount = node.length;
+              const wordCount = node.trim().split(/\s+/).filter(Boolean).length;
+              totalCharacters += charCount;
+              totalWords += wordCount;
+
+              if (glossary[node] || globalTranslationMemory[node]) {
+                translatedKeys++;
+              } else {
+                missingKeys++;
+                wordsToTranslate += wordCount;
+                charactersToTranslate += charCount;
+              }
+            }
+            return;
+          }
+          if (Array.isArray(node)) {
+            for (const el of node) scanJsonNode(el);
+            return;
+          }
+          if (typeof node === "object") {
+            const translatableKeys = ["name", "text", "description", "title", "subtitle", "lore", "pages", "message", "tooltip", "header"];
+            for (const k of Object.keys(node)) {
+              if (translatableKeys.some(tk => k.toLowerCase().includes(tk))) {
+                scanJsonNode(node[k]);
+              }
+            }
+          }
+        };
+
+        scanJsonNode(json);
+      }
+    } catch (e) {
+      // ignore parsing errors
+    }
+
+    fileReports.push({
+      path: entryPath,
+      type,
+      totalKeys,
+      translatedKeys,
+      missingKeys,
+      unmodifiedKeys,
+      totalWords,
+      totalCharacters,
+      wordsToTranslate,
+      charactersToTranslate,
+    });
+  }
+
+  // Aggregate stats
+  let totalOriginalKeys = 0;
+  let totalAlreadyTranslatedKeys = 0;
+  let totalMissingKeys = 0;
+  let totalUnmodifiedKeys = 0;
+  let totalWords = 0;
+  let totalCharacters = 0;
+  let wordsToTranslate = 0;
+  let charactersToTranslate = 0;
+
+  for (const report of fileReports) {
+    totalOriginalKeys += report.totalKeys;
+    totalAlreadyTranslatedKeys += report.translatedKeys;
+    totalMissingKeys += report.missingKeys;
+    totalUnmodifiedKeys += report.unmodifiedKeys;
+    totalWords += report.totalWords;
+    totalCharacters += report.totalCharacters;
+    wordsToTranslate += report.wordsToTranslate;
+    charactersToTranslate += report.charactersToTranslate;
+  }
+
+  // Calculate savings percent
+  let estimatedApiSavingsPercent = 0;
+  if (totalOriginalKeys > 0) {
+    estimatedApiSavingsPercent = Math.round(
+      ((totalOriginalKeys - (totalMissingKeys + totalUnmodifiedKeys)) / totalOriginalKeys) * 100
+    );
+  }
+
+  return {
+    originalName,
+    totalFiles: entries.length,
+    translatableFilesCount: translatableEntries.length,
+    totalOriginalKeys,
+    totalAlreadyTranslatedKeys,
+    totalMissingKeys,
+    totalUnmodifiedKeys,
+    totalWords,
+    totalCharacters,
+    wordsToTranslate,
+    charactersToTranslate,
+    estimatedApiSavingsPercent: Math.max(0, Math.min(100, estimatedApiSavingsPercent)),
+    files: fileReports,
+  };
 }
