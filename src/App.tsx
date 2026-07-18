@@ -251,6 +251,36 @@ export default function App() {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
 
+  const addCustomToast = (title: string, message: string, type: "success" | "error" | "info") => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts(prev => [...prev, { id, title, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 10000); // give 10s for critical configuration warnings
+  };
+
+  const handleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (error: any) {
+      console.error("Firebase Auth Error:", error);
+      if (error.code === "auth/unauthorized-domain") {
+        const domain = window.location.hostname;
+        addCustomToast(
+          "Configuración Requerida",
+          `Para iniciar sesión en Netlify, debes agregar "${domain}" a la lista de Dominios Autorizados en la consola de Firebase (Autenticación -> Configuración).`,
+          "error"
+        );
+      } else {
+        addCustomToast(
+          "Error de Autenticación",
+          error.message || "No se pudo iniciar sesión con Google.",
+          "error"
+        );
+      }
+    }
+  };
+
   // Pre-analysis states
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<any | null>(null);
@@ -684,7 +714,7 @@ export default function App() {
               </div>
             ) : (
               <button
-                onClick={() => signInWithPopup(auth, googleProvider)}
+                onClick={handleSignIn}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 text-emerald-400 rounded-lg text-xs font-bold transition-all cursor-pointer"
               >
                 <span>Acceder con Google</span>
