@@ -89,6 +89,10 @@ interface TranslationDiffEntry {
   translated: string;
 }
 
+const API_BASE = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".run.app"))
+  ? ""
+  : "https://ais-pre-6fjyrq6hehrxtccdi2555v-312633509664.us-east1.run.app";
+
 export default function App() {
   // Authentication states
   const [user, setUser] = useState<User | null>(null);
@@ -393,7 +397,7 @@ export default function App() {
     // Also fetch default glossary from server once
     const fetchDefaultGlossaryOnly = async () => {
       try {
-        const res = await fetch("/api/glossary");
+        const res = await fetch(`${API_BASE}/api/glossary`);
         if (res.ok) {
           const data = await res.json();
           setDefaultGlossary(data.defaultGlossary || {});
@@ -409,7 +413,7 @@ export default function App() {
 
   const fetchTasks = async () => {
     try {
-      const res = await fetch("/api/tasks");
+      const res = await fetch(`${API_BASE}/api/tasks`);
       if (res.ok) {
         const data = await res.json();
         setTasks(data.tasks || []);
@@ -421,7 +425,7 @@ export default function App() {
 
   const fetchGlossary = async () => {
     try {
-      const res = await fetch("/api/glossary");
+      const res = await fetch(`${API_BASE}/api/glossary`);
       if (res.ok) {
         const data = await res.json();
         setDefaultGlossary(data.defaultGlossary || {});
@@ -446,7 +450,7 @@ export default function App() {
       }
     } else {
       try {
-        const res = await fetch("/api/glossary", {
+        const res = await fetch(`${API_BASE}/api/glossary`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ glossary: updatedGlossary })
@@ -542,7 +546,7 @@ export default function App() {
     formData.append("options", JSON.stringify(options));
 
     try {
-      const res = await fetch("/api/translate", {
+      const res = await fetch(`${API_BASE}/api/translate`, {
         method: "POST",
         body: formData
       });
@@ -585,7 +589,7 @@ export default function App() {
     formData.append("options", JSON.stringify(options));
 
     try {
-      const res = await fetch("/api/analyze", {
+      const res = await fetch(`${API_BASE}/api/analyze`, {
         method: "POST",
         body: formData
       });
@@ -606,7 +610,7 @@ export default function App() {
 
   const clearFinishedTasks = async () => {
     try {
-      await fetch("/api/tasks/clear", { method: "POST" });
+      await fetch(`${API_BASE}/api/tasks/clear`, { method: "POST" });
     } catch (err) {
       console.error("Error al limpiar tareas en memoria:", err);
     }
@@ -1239,7 +1243,7 @@ export default function App() {
                   <div className="flex items-center gap-3">
                     {totalCompleted > 0 && (
                       <a
-                        href={user ? `/api/download-all?userId=${user.uid}` : "/api/download-all"}
+                        href={user ? `${API_BASE}/api/download-all?userId=${user.uid}` : `${API_BASE}/api/download-all`}
                         className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 text-emerald-400 rounded text-[10px] uppercase tracking-wider font-bold transition-all"
                       >
                         <Download className="w-3 h-3" />
@@ -1365,15 +1369,18 @@ export default function App() {
                                 </p>
                               </div>
                               <div className="flex items-center gap-2 self-stretch sm:self-auto justify-end shrink-0">
-                                {task.status === "completed" && task.downloadUrl && (
-                                  <a
-                                    href={user ? `${task.downloadUrl}?userId=${user.uid}` : task.downloadUrl}
-                                    className="flex items-center gap-1 px-2.5 py-1 bg-emerald-500 hover:bg-emerald-400 text-black rounded font-bold text-[10px] transition-all shadow-md cursor-pointer"
-                                  >
-                                    <Download className="w-3 h-3" />
-                                    DESCARGAR
-                                  </a>
-                                )}
+                                {task.status === "completed" && task.downloadUrl && (() => {
+                                  const finalDlUrl = task.downloadUrl.startsWith("http") ? task.downloadUrl : `${API_BASE}${task.downloadUrl}`;
+                                  return (
+                                    <a
+                                      href={user ? `${finalDlUrl}?userId=${user.uid}` : finalDlUrl}
+                                      className="flex items-center gap-1 px-2.5 py-1 bg-emerald-500 hover:bg-emerald-400 text-black rounded font-bold text-[10px] transition-all shadow-md cursor-pointer"
+                                    >
+                                      <Download className="w-3 h-3" />
+                                      DESCARGAR
+                                    </a>
+                                  );
+                                })()}
                                 {task.status === "completed" && (
                                   <button
                                     onClick={() => toggleDiff(task.id)}
