@@ -1,0 +1,6 @@
+{
+  "name": "Minecraft Mod Translator",
+  "description": "An automated full-stack application to translate Minecraft mods (Forge, NeoForge, Fabric) into Spanish, leveraging Gemini and maintaining mod structure, variables, and custom glossaries.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
