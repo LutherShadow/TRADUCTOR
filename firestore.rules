@@ -52,16 +52,16 @@ service cloud.firestore {
              data.originalName is string && data.originalName.size() <= 255 &&
              data.translatedName is string && data.translatedName.size() <= 255 &&
              data.status is string && (data.status == 'queued' || data.status == 'processing' || data.status == 'completed' || data.status == 'failed') &&
-             data.progress is int && data.progress >= 0 && data.progress <= 100 &&
-             data.totalFiles is int && data.totalFiles >= 0 &&
-             data.processedFiles is int && data.processedFiles >= 0 &&
+             data.progress is number && data.progress >= 0 && data.progress <= 100 &&
+             data.totalFiles is number && data.totalFiles >= 0 &&
+             data.processedFiles is number && data.processedFiles >= 0 &&
              data.stats is map &&
-             data.stats.wordsTranslated is int &&
-             data.stats.charactersSavedByMemory is int &&
-             data.stats.filesTranslated is int &&
-             data.stats.filesIgnored is int &&
-             data.stats.errorsCount is int &&
-             data.stats.timeSpentMs is int &&
+             data.stats.wordsTranslated is number &&
+             data.stats.charactersSavedByMemory is number &&
+             data.stats.filesTranslated is number &&
+             data.stats.filesIgnored is number &&
+             data.stats.errorsCount is number &&
+             data.stats.timeSpentMs is number &&
              data.errors is list && (data.errors.size() == 0 || (data.errors.size() > 0 && data.errors[0] is string)) &&
              data.logs is list && (data.logs.size() == 0 || (data.logs.size() > 0 && data.logs[0] is string)) &&
              (!('downloadUrl' in data) || (data.downloadUrl is string && data.downloadUrl.size() <= 500)) &&
@@ -95,7 +95,7 @@ service cloud.firestore {
         allow create: if isOwner(userId) && isValidTask(incoming());
         allow update: if isOwner(userId) && isValidTask(incoming()) && (
           // Protect core fields from shadow mutations, only allowing progressive updates
-          incoming().diff(existing()).affectedKeys().hasOnly(['progress', 'processedFiles', 'status', 'stats', 'errors', 'logs', 'downloadUrl', 'diff', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['progress', 'totalFiles', 'processedFiles', 'status', 'stats', 'errors', 'logs', 'downloadUrl', 'diff', 'updatedAt'])
         );
         allow delete: if isOwner(userId);
       }
