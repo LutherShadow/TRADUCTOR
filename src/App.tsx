@@ -112,6 +112,9 @@ export default function App() {
   const [translateStructures, setTranslateStructures] = useState(true);
   const [translateAll, setTranslateAll] = useState(false);
   const [targetLocale, setTargetLocale] = useState<"es_es" | "es_mx" | "both">("es_es");
+  const [translationStyle, setTranslationStyle] = useState<"natural" | "literal">(() => {
+    return (localStorage.getItem("mc_translation_style") as "natural" | "literal") || "natural";
+  });
 
   // API Engine options
   const [apiEngine, setApiEngine] = useState<string>(() => {
@@ -128,6 +131,10 @@ export default function App() {
   });
 
   // Save changes to localStorage
+  useEffect(() => {
+    localStorage.setItem("mc_translation_style", translationStyle);
+  }, [translationStyle]);
+
   useEffect(() => {
     localStorage.setItem("mc_api_engine", apiEngine);
   }, [apiEngine]);
@@ -160,6 +167,11 @@ export default function App() {
   );
   const [queueStatusFilter, setQueueStatusFilter] = useState<"all" | "pending" | "completed">("all");
   const prevTasksRef = useRef<Record<string, "pending" | "processing" | "completed" | "failed">>({});
+  const tasksRef = useRef<TranslationTask[]>([]);
+
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
 
   const requestNotificationPermission = async () => {
     if (!("Notification" in window)) return;
@@ -332,12 +344,12 @@ export default function App() {
     if (authLoading) return;
     if (!user) {
       fetchTasks();
-      const interval = setInterval(fetchTasks, 1500);
+      const interval = setInterval(() => fetchTasks(), 1500);
       return () => clearInterval(interval);
     }
 
-    const tasksRef = collection(db, "users", user.uid, "tasks");
-    const q = query(tasksRef, orderBy("createdAt", "desc"));
+    const tasksRefCollection = collection(db, "users", user.uid, "tasks");
+    const q = query(tasksRefCollection, orderBy("createdAt", "desc"));
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const list: TranslationTask[] = [];
@@ -348,7 +360,15 @@ export default function App() {
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, `users/${user.uid}/tasks`);
     });
-    return () => unsubscribe();
+
+    // Also run a client-side polling sync loop to fetch from server and save to Firestore
+    fetchTasks(user.uid);
+    const interval = setInterval(() => fetchTasks(user.uid), 2000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
   }, [user, authLoading]);
 
   // Track tasks transitions to trigger completion/failure notifications and toasts
@@ -425,12 +445,66 @@ export default function App() {
     return () => unsubscribe();
   }, [user, authLoading]);
 
-  const fetchTasks = async () => {
+  const fetchTasks = async (userId?: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/tasks`);
+      const url = userId ? `${API_BASE}/api/tasks?userId=${userId}` : `${API_BASE}/api/tasks`;
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
-        setTasks(data.tasks || []);
+        const serverTasks: TranslationTask[] = data.tasks || [];
+        
+        if (userId && serverTasks.length > 0) {
+          serverTasks.forEach((task) => {
+            const localTask = tasksRef.current.find(t => t.id === task.id);
+            if (!localTask || 
+                localTask.status !== task.status || 
+                localTask.progress !== task.progress || 
+                localTask.processedFiles !== task.processedFiles ||
+                JSON.stringify(localTask.logs) !== JSON.stringify(task.logs) ||
+                JSON.stringify(localTask.errors) !== JSON.stringify(task.errors) ||
+                localTask.downloadUrl !== task.downloadUrl
+            ) {
+              const taskDocRef = doc(db, "users", userId, "tasks", task.id);
+              const cleanTask: any = {
+                id: task.id,
+                userId: userId,
+                originalName: task.originalName || "",
+                translatedName: task.translatedName || "",
+                status: task.status || "queued",
+                progress: typeof task.progress === "number" ? task.progress : 0,
+                totalFiles: typeof task.totalFiles === "number" ? task.totalFiles : 0,
+                processedFiles: typeof task.processedFiles === "number" ? task.processedFiles : 0,
+                stats: {
+                  wordsTranslated: typeof task.stats?.wordsTranslated === "number" ? task.stats.wordsTranslated : 0,
+                  charactersSavedByMemory: typeof task.stats?.charactersSavedByMemory === "number" ? task.stats.charactersSavedByMemory : 0,
+                  filesTranslated: typeof task.stats?.filesTranslated === "number" ? task.stats.filesTranslated : 0,
+                  filesIgnored: typeof task.stats?.filesIgnored === "number" ? task.stats.filesIgnored : 0,
+                  errorsCount: typeof task.stats?.errorsCount === "number" ? task.stats.errorsCount : 0,
+                  timeSpentMs: typeof task.stats?.timeSpentMs === "number" ? task.stats.timeSpentMs : 0
+                },
+                errors: Array.isArray(task.errors) ? task.errors : [],
+                logs: Array.isArray(task.logs) ? task.logs : [],
+                createdAt: task.createdAt || new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              };
+
+              if (task.downloadUrl) {
+                cleanTask.downloadUrl = task.downloadUrl;
+              }
+              if (Array.isArray(task.diff)) {
+                cleanTask.diff = task.diff;
+              }
+
+              setDoc(taskDocRef, cleanTask, { merge: true }).catch(err => {
+                console.error("Error client-syncing task to Firestore:", err);
+              });
+            }
+          });
+        }
+        
+        if (!userId) {
+          setTasks(serverTasks);
+        }
       }
     } catch (err) {
       console.error("Error al consultar tareas de traducción:", err);
@@ -553,6 +627,7 @@ export default function App() {
       translateStructures,
       translateAll,
       targetLocale,
+      translationStyle,
       customGlossary,
       apiEngine,
       customApiKeys
@@ -571,7 +646,7 @@ export default function App() {
       }
 
       // Refresh immediately
-      fetchTasks();
+      fetchTasks(user?.uid);
     } catch (err: any) {
       setUploadError(err.message || "Error al procesar archivos.");
     } finally {
@@ -596,6 +671,7 @@ export default function App() {
       translateStructures,
       translateAll,
       targetLocale,
+      translationStyle,
       customGlossary,
       apiEngine,
       customApiKeys
@@ -955,6 +1031,58 @@ export default function App() {
                     {targetLocale === "both" && <div className="w-1.5 h-1.5 bg-black rounded-full" />}
                   </div>
                 </button>
+              </div>
+
+              {/* Adaptation Style selector */}
+              <div className="mt-6 pt-5 border-t border-white/5">
+                <h4 className="text-[10px] uppercase tracking-widest font-bold text-slate-400 mb-2 flex items-center gap-2">
+                  Adaptación al Contexto
+                </h4>
+                <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                  Define el estilo de traducción. Una traducción literal se mantiene fiel a las palabras originales en inglés, mientras que una traducción natural/idiomática adapta las frases a la localización típica de videojuegos.
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setTranslationStyle("natural")}
+                    className={`flex flex-col items-start p-3 rounded-lg border text-xs font-semibold text-left transition-all cursor-pointer ${
+                      translationStyle === "natural"
+                        ? "bg-emerald-500/10 border-emerald-500 text-emerald-400"
+                        : "bg-white/5 border-white/5 hover:border-white/10 text-slate-300"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full mb-1">
+                      <span>Más Natural (Recomendada)</span>
+                      <div className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${translationStyle === "natural" ? "border-emerald-500 bg-emerald-500 text-black" : "border-white/20"}`}>
+                        {translationStyle === "natural" && <div className="w-1.5 h-1.5 bg-black rounded-full" />}
+                      </div>
+                    </div>
+                    <span className="text-[10px] text-slate-500 font-normal leading-normal">
+                      Adaptada a la jerga de Minecraft, más inmersiva y fluida.
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setTranslationStyle("literal")}
+                    className={`flex flex-col items-start p-3 rounded-lg border text-xs font-semibold text-left transition-all cursor-pointer ${
+                      translationStyle === "literal"
+                        ? "bg-emerald-500/10 border-emerald-500 text-emerald-400"
+                        : "bg-white/5 border-white/5 hover:border-white/10 text-slate-300"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full mb-1">
+                      <span>Más Literal</span>
+                      <div className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${translationStyle === "literal" ? "border-emerald-500 bg-emerald-500 text-black" : "border-white/20"}`}>
+                        {translationStyle === "literal" && <div className="w-1.5 h-1.5 bg-black rounded-full" />}
+                      </div>
+                    </div>
+                    <span className="text-[10px] text-slate-500 font-normal leading-normal">
+                      Fiel palabra por palabra al texto original en inglés.
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
 

@@ -65,10 +65,11 @@ service cloud.firestore {
              data.errors is list && (data.errors.size() == 0 || (data.errors.size() > 0 && data.errors[0] is string)) &&
              data.logs is list && (data.logs.size() == 0 || (data.logs.size() > 0 && data.logs[0] is string)) &&
              (!('downloadUrl' in data) || (data.downloadUrl is string && data.downloadUrl.size() <= 500)) &&
+             (!('diff' in data) || data.diff is list) &&
              data.createdAt is string && 
              data.updatedAt is string &&
              data.keys().hasAll(['id', 'userId', 'originalName', 'translatedName', 'status', 'progress', 'totalFiles', 'processedFiles', 'stats', 'errors', 'logs', 'createdAt', 'updatedAt']) &&
-             data.keys().size() <= 14;
+             data.keys().size() <= 15;
     }
 
     // Validates a Glossary document
@@ -94,7 +95,7 @@ service cloud.firestore {
         allow create: if isOwner(userId) && isValidTask(incoming());
         allow update: if isOwner(userId) && isValidTask(incoming()) && (
           // Protect core fields from shadow mutations, only allowing progressive updates
-          incoming().diff(existing()).affectedKeys().hasOnly(['progress', 'processedFiles', 'status', 'stats', 'errors', 'logs', 'downloadUrl', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['progress', 'processedFiles', 'status', 'stats', 'errors', 'logs', 'downloadUrl', 'diff', 'updatedAt'])
         );
         allow delete: if isOwner(userId);
       }

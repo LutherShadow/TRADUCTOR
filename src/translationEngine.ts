@@ -52,6 +52,7 @@ export interface TranslationOptions {
   translateStructures: boolean;
   translateAll: boolean;
   targetLocale: "es_es" | "es_mx" | "both";
+  translationStyle?: "natural" | "literal";
   customGlossary: Record<string, string>;
   apiEngine?: string;
   customApiKeys?: Record<string, string>;
@@ -295,6 +296,11 @@ async function translateBatch(
     .map(([en, es]) => `- "${en}" -> "${es}"`)
     .join("\n");
 
+  const isLiteral = options.translationStyle === "literal";
+  const styleDescription = isLiteral
+    ? "5. Translation Style: Provide a more LITERAL translation. Stay as close as possible to the original English wording, word order, and phrasing, ensuring it remains grammatically correct in Spanish."
+    : "5. Translation Style: Provide a more NATURAL and IDIOMATIC translation. Focus on localizing the phrasing, idioms, and expression flow so it sounds like an organic, professional game localization, rather than a word-for-word translation.";
+
   const systemInstruction = `You are a professional Minecraft Mod Translator specializing in Spanish translations.
 Your task is to translate values from English to ${targetLangName}.
 
@@ -309,7 +315,8 @@ STRICT RULES:
 3. Apply this custom glossary strictly for term consistency:
 ${glossaryText}
 4. Translate only the human-readable text visible to players. Keep the tone natural, engaging, and faithful to standard Minecraft terminology (e.g. use "Mesa de trabajo" for Crafting Table, "Mundo Superior" for Overworld, etc.).
-5. You MUST return a JSON object with the exact same keys as the input. Do NOT omit any keys or alter their names. Output ONLY the valid JSON object.`;
+${styleDescription}
+6. You MUST return a JSON object with the exact same keys as the input. Do NOT omit any keys or alter their names. Output ONLY the valid JSON object.`;
 
   try {
     if (engine === "google_free") {

@@ -71,8 +71,10 @@ async function syncTaskToFirestore(userId: string | undefined, task: Translation
       createdAt: (task as any).createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }, { merge: true });
-  } catch (err) {
-    console.error(`Error al sincronizar tarea ${task.id} en Firestore:`, err);
+  } catch (err: any) {
+    // If server container's GCP service account lacks Firestore write IAM permissions,
+    // client-side sync loop will safely sync progress instead.
+    console.warn(`[Firestore Sync Notice] Server-side direct sync for task ${task.id} skipped/lacked permissions (Client-side sync loop handles this): ${err.message || err}`);
   }
 }
 
@@ -183,8 +185,15 @@ async function processQueue() {
 
 // 1. Get task list & overall statistics
 app.get("/api/tasks", (req, res) => {
+  const reqUserId = req.query.userId as string | undefined;
+  let list = Object.values(tasks);
+  if (reqUserId) {
+    list = list.filter(t => (t as any)._userId === reqUserId);
+  } else {
+    list = list.filter(t => !(t as any)._userId);
+  }
   res.json({
-    tasks: Object.values(tasks).map(t => {
+    tasks: list.map(t => {
       // Omit heavy internal parameters from response
       const { _originalFilePath, _options, ...clientTask } = t as any;
       return clientTask;
@@ -210,6 +219,7 @@ app.post("/api/translate", upload.array("files"), (req, res) => {
       translateStructures: true,
       translateAll: false,
       targetLocale: "es_es",
+      translationStyle: "natural",
       customGlossary: {}
     };
 
@@ -298,6 +308,7 @@ app.post("/api/analyze", upload.single("file"), async (req, res) => {
       translateStructures: true,
       translateAll: false,
       targetLocale: "es_es",
+      translationStyle: "natural",
       customGlossary: {}
     };
 
