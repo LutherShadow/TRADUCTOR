@@ -104,15 +104,23 @@ const apiFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<R
     urlString = `${API_BASE}${urlString}`;
   }
 
-  try {
-    const res = await fetch(urlString, {
-      ...init,
-      redirect: "manual", // Intercept 302 redirects to prevent browser fetch CORS crashes
-      credentials: "include",
-    });
+  const isCrossSite = API_BASE !== "";
 
-    // In cross-origin manual redirect mode, a 302/307 redirect results in status 0
-    if (res.status === 0 || res.status === 302 || res.status === 307) {
+  try {
+    const fetchOptions: RequestInit = {
+      ...init,
+      credentials: "include",
+    };
+
+    if (isCrossSite) {
+      // In cross-origin mode, we must set manual redirects to detect the auth challenge 302
+      // and trigger our cookie authorization UI rather than letting the browser block it.
+      fetchOptions.redirect = "manual";
+    }
+
+    const res = await fetch(urlString, fetchOptions);
+
+    if (isCrossSite && (res.status === 0 || res.status === 302 || res.status === 307)) {
       if (typeof window !== "undefined" && (window as any).setCookieAuthRequired) {
         (window as any).setCookieAuthRequired(true);
       }
@@ -121,10 +129,12 @@ const apiFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<R
 
     return res;
   } catch (error: any) {
-    // If a request fails due to a CORS redirect failure, trigger the cookie authorization flow
-    if (error instanceof TypeError && error.message.includes("Failed to fetch")) {
-      if (typeof window !== "undefined" && (window as any).setCookieAuthRequired) {
-        (window as any).setCookieAuthRequired(true);
+    if (isCrossSite) {
+      // If a request fails due to a CORS redirect failure, trigger the cookie authorization flow
+      if (error instanceof TypeError && (error.message.includes("Failed to fetch") || error.message.includes("NetworkError"))) {
+        if (typeof window !== "undefined" && (window as any).setCookieAuthRequired) {
+          (window as any).setCookieAuthRequired(true);
+        }
       }
     }
     throw error;
