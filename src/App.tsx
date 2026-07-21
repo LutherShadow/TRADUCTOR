@@ -150,6 +150,16 @@ export default function App() {
   const [newEsTerm, setNewEsTerm] = useState("");
   const [showGlossaryModal, setShowGlossaryModal] = useState(false);
   const [glossarySearch, setGlossarySearch] = useState("");
+  const [glossaryTab, setGlossaryTab] = useState<"list" | "json">("list");
+  const [jsonText, setJsonText] = useState("");
+  const [jsonError, setJsonError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (showGlossaryModal && glossaryTab === "json") {
+      setJsonText(JSON.stringify(customGlossary, null, 2));
+      setJsonError(null);
+    }
+  }, [showGlossaryModal, glossaryTab, customGlossary]);
 
   // UI States
   const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
@@ -570,6 +580,62 @@ export default function App() {
     const updated = { ...customGlossary };
     delete updated[key];
     saveCustomGlossary(updated);
+  };
+
+  const handleJsonChange = (val: string) => {
+    setJsonText(val);
+    if (!val.trim()) {
+      setJsonError("El JSON no puede estar vacío");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(val);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        setJsonError("Formato inválido: El JSON debe ser un objeto plano { \"inglés\": \"español\" }");
+        return;
+      }
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value !== "string") {
+          setJsonError(`Valor inválido para "${key}": la traducción debe ser un texto.`);
+          return;
+        }
+      }
+      setJsonError(null);
+    } catch (err: any) {
+      setJsonError(`Error de sintaxis: ${err.message}`);
+    }
+  };
+
+  const handleSaveJsonGlossary = () => {
+    try {
+      if (!jsonText.trim()) {
+        setJsonError("El JSON no puede estar vacío");
+        return;
+      }
+      const parsed = JSON.parse(jsonText);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        setJsonError("Formato inválido: El JSON debe ser un objeto plano { \"inglés\": \"español\" }");
+        return;
+      }
+      const cleaned: Record<string, string> = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value !== "string") {
+          setJsonError(`Valor inválido para "${key}": la traducción debe ser un texto.`);
+          return;
+        }
+        cleaned[key.trim()] = value.trim();
+      }
+      saveCustomGlossary(cleaned);
+      setJsonError(null);
+      addCustomToast(
+        "Glosario Actualizado",
+        "Tus reglas personalizadas se importaron y guardaron correctamente.",
+        "success"
+      );
+      setGlossaryTab("list");
+    } catch (err: any) {
+      setJsonError(`Error de sintaxis: ${err.message}`);
+    }
   };
 
   // Drag & Drop Handlers
@@ -1804,114 +1870,219 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Tab Selector */}
+              <div className="px-5 flex border-b border-white/5 bg-[#0a0c0e]">
+                <button
+                  type="button"
+                  onClick={() => setGlossaryTab("list")}
+                  className={`px-4 py-3 text-[10px] font-bold uppercase tracking-wider border-b-2 transition-all cursor-pointer flex items-center gap-2 ${
+                    glossaryTab === "list"
+                      ? "border-emerald-500 text-emerald-400"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                  Lista de Reglas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGlossaryTab("json")}
+                  className={`px-4 py-3 text-[10px] font-bold uppercase tracking-wider border-b-2 transition-all cursor-pointer flex items-center gap-2 ${
+                    glossaryTab === "json"
+                      ? "border-emerald-500 text-emerald-400"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <FileCode className="w-3.5 h-3.5" />
+                  Editar como JSON (Validador)
+                </button>
+              </div>
+
               {/* Modal Content */}
               <div className="p-6 overflow-y-auto flex-1 space-y-6">
                 
-                {/* Form to add rule */}
-                <form onSubmit={handleAddGlossaryTerm} className="p-4 bg-white/[0.02] rounded-xl border border-white/5">
-                  <h4 className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest mb-3">Agregar Nueva Regla al Glosario</h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-                    <div>
-                      <label className="block text-[9px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Término en Inglés</label>
-                      <input
-                        type="text"
-                        required
-                        value={newEnTerm}
-                        onChange={(e) => setNewEnTerm(e.target.value)}
-                        placeholder="Ej. Spell Book"
-                        className="w-full px-3 py-2 bg-[#1a1c1e] border border-white/10 rounded text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[9px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Traducción al Español</label>
-                      <input
-                        type="text"
-                        required
-                        value={newEsTerm}
-                        onChange={(e) => setNewEsTerm(e.target.value)}
-                        placeholder="Ej. Libro de Hechizos"
-                        className="w-full px-3 py-2 bg-[#1a1c1e] border border-white/10 rounded text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-                      />
-                    </div>
-                  </div>
-                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                    <p className="text-[10px] text-slate-500 leading-normal max-w-sm">
-                      Esta regla asegurará que la IA traduzca el término de forma 100% idéntica y consistente en todos los archivos.
-                    </p>
-                    <button
-                      type="submit"
-                      className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded text-xs transition-all shadow-md flex items-center gap-1.5 cursor-pointer shrink-0"
-                    >
-                      <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                      AGREGAR REGLA
-                    </button>
-                  </div>
-                </form>
+                {glossaryTab === "json" ? (
+                  <div className="space-y-4">
+                    <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5 space-y-3">
+                      <h4 className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest">
+                        Editor de Reglas JSON
+                      </h4>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        Edita las reglas directamente en formato JSON. El validador verificará la sintaxis en tiempo real para evitar errores durante la traducción. Formato esperado: 
+                        <code className="mx-1 px-1.5 py-0.5 bg-white/5 rounded text-emerald-300 font-mono text-[11px]">
+                          {"{ \"Término Inglés\": \"Traducción Español\" }"}
+                        </code>.
+                      </p>
 
-                {/* Rules List */}
-                <div className="space-y-4">
-                  <div className="flex justify-between items-center">
-                    <h4 className="text-xs font-bold text-white uppercase tracking-wider">Listado de Reglas Activas</h4>
-                    <input
-                      type="text"
-                      placeholder="Buscar término..."
-                      value={glossarySearch}
-                      onChange={(e) => setGlossarySearch(e.target.value)}
-                      className="px-3 py-1.5 bg-[#1a1c1e] border border-white/10 rounded text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 w-44"
-                    />
-                  </div>
-
-                  <div className="space-y-2 max-h-72 overflow-y-auto border border-white/5 rounded-xl p-2 bg-[#08090a]">
-                    
-                    {/* Custom Rules */}
-                    {filteredCustomGlossary.length > 0 && (
-                      <div className="space-y-1">
-                        <div className="text-[9px] text-emerald-400 font-bold uppercase tracking-widest px-2 py-1">Tus Reglas Personalizadas</div>
-                        {filteredCustomGlossary.map(([en, es]) => (
-                          <div key={en} className="flex justify-between items-center p-2 bg-white/5 hover:bg-[#0d0f11] rounded-lg border border-white/5 text-[11px] text-slate-300 transition-all">
-                            <div className="flex items-center gap-3">
-                              <span className="font-semibold text-white">{en}</span>
-                              <span className="text-slate-500">→</span>
-                              <span className="text-emerald-300 font-semibold">{es}</span>
-                            </div>
-                            <button
-                              onClick={() => handleRemoveGlossaryTerm(en)}
-                              className="p-1 hover:bg-red-950/40 text-slate-500 hover:text-red-400 rounded transition-all cursor-pointer"
-                              title="Eliminar regla"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
+                      <div className="relative">
+                        <textarea
+                          rows={12}
+                          value={jsonText}
+                          onChange={(e) => handleJsonChange(e.target.value)}
+                          placeholder='{\n  "Spell Book": "Libro de Hechizos",\n  "Ender Pearl": "Perla de Ender"\n}'
+                          className="w-full px-4 py-3 bg-[#101113] border border-white/10 rounded-lg font-mono text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 leading-relaxed resize-y"
+                        />
                       </div>
-                    )}
 
-                    {/* Default Rules */}
-                    <div className="space-y-1 pt-2">
-                      <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest px-2 py-1 flex items-center gap-1">
-                        <Info className="w-3 h-3 text-slate-500" />
-                        Glosario Minecraft por Defecto (Protegido)
-                      </div>
-                      {filteredDefaultGlossary.map(([en, es]) => (
-                        <div key={en} className="flex justify-between items-center p-2 bg-white/[0.02] rounded-lg text-[11px] text-slate-400">
-                          <div className="flex items-center gap-3">
-                            <span className="font-medium">{en}</span>
-                            <span className="text-slate-600">→</span>
-                            <span className="text-slate-300">{es}</span>
+                      {/* Validator Feedback Banner */}
+                      {jsonError ? (
+                        <div className="flex items-start gap-2.5 p-3 rounded-lg bg-red-950/20 border border-red-500/30 text-red-400 text-xs">
+                          <ShieldAlert className="w-4 h-4 mt-0.5 shrink-0" />
+                          <div>
+                            <span className="font-bold block mb-0.5">Sintaxis JSON Inválida</span>
+                            <span className="opacity-90 font-mono text-[11px] leading-relaxed break-all">{jsonError}</span>
                           </div>
-                          <span className="text-[9px] text-slate-600 font-semibold uppercase tracking-wider">Sistema</span>
                         </div>
-                      ))}
-                    </div>
+                      ) : (
+                        <div className="flex items-center gap-2.5 p-3 rounded-lg bg-emerald-950/20 border border-emerald-500/30 text-emerald-400 text-xs">
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          <div>
+                            <span className="font-bold">Sintaxis JSON Válida</span>
+                            <span className="block text-[10px] text-slate-500 font-normal">
+                              Listo para guardar. Se detectaron {(() => {
+                                try {
+                                  return Object.keys(JSON.parse(jsonText || "{}")).length;
+                                } catch (e) {
+                                  return 0;
+                                }
+                              })()} reglas.
+                            </span>
+                          </div>
+                        </div>
+                      )}
 
-                    {filteredCustomGlossary.length === 0 && filteredDefaultGlossary.length === 0 && (
-                      <div className="text-center p-6 text-slate-500 italic text-xs">
-                        No se encontraron términos que coincidan con la búsqueda.
+                      <div className="flex justify-end gap-3 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setGlossaryTab("list");
+                            setJsonError(null);
+                          }}
+                          className="px-4 py-2 bg-white/5 hover:bg-white/10 text-slate-300 font-bold rounded text-xs transition-all cursor-pointer"
+                        >
+                          CANCELAR
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!!jsonError}
+                          onClick={handleSaveJsonGlossary}
+                          className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-30 disabled:hover:bg-emerald-500 text-black font-bold rounded text-xs transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          GUARDAR JSON
+                        </button>
                       </div>
-                    )}
-
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <>
+                    {/* Form to add rule */}
+                    <form onSubmit={handleAddGlossaryTerm} className="p-4 bg-white/[0.02] rounded-xl border border-white/5">
+                      <h4 className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest mb-3">Agregar Nueva Regla al Glosario</h4>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                        <div>
+                          <label className="block text-[9px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Término en Inglés</label>
+                          <input
+                            type="text"
+                            required
+                            value={newEnTerm}
+                            onChange={(e) => setNewEnTerm(e.target.value)}
+                            placeholder="Ej. Spell Book"
+                            className="w-full px-3 py-2 bg-[#1a1c1e] border border-white/10 rounded text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Traducción al Español</label>
+                          <input
+                            type="text"
+                            required
+                            value={newEsTerm}
+                            onChange={(e) => setNewEsTerm(e.target.value)}
+                            placeholder="Ej. Libro de Hechizos"
+                            className="w-full px-3 py-2 bg-[#1a1c1e] border border-white/10 rounded text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <p className="text-[10px] text-slate-500 leading-normal max-w-sm">
+                          Esta regla asegurará que la IA traduzca el término de forma 100% idéntica y consistente en todos los archivos.
+                        </p>
+                        <button
+                          type="submit"
+                          className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded text-xs transition-all shadow-md flex items-center gap-1.5 cursor-pointer shrink-0"
+                        >
+                          <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                          AGREGAR REGLA
+                        </button>
+                      </div>
+                    </form>
+
+                    {/* Rules List */}
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-center">
+                        <h4 className="text-xs font-bold text-white uppercase tracking-wider">Listado de Reglas Activas</h4>
+                        <input
+                          type="text"
+                          placeholder="Buscar término..."
+                          value={glossarySearch}
+                          onChange={(e) => setGlossarySearch(e.target.value)}
+                          className="px-3 py-1.5 bg-[#1a1c1e] border border-white/10 rounded text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 w-44"
+                        />
+                      </div>
+
+                      <div className="space-y-2 max-h-72 overflow-y-auto border border-white/5 rounded-xl p-2 bg-[#08090a]">
+                        
+                        {/* Custom Rules */}
+                        {filteredCustomGlossary.length > 0 && (
+                          <div className="space-y-1">
+                            <div className="text-[9px] text-emerald-400 font-bold uppercase tracking-widest px-2 py-1">Tus Reglas Personalizadas</div>
+                            {filteredCustomGlossary.map(([en, es]) => (
+                              <div key={en} className="flex justify-between items-center p-2 bg-white/5 hover:bg-[#0d0f11] rounded-lg border border-white/5 text-[11px] text-slate-300 transition-all">
+                                <div className="flex items-center gap-3">
+                                  <span className="font-semibold text-white">{en}</span>
+                                  <span className="text-slate-500">→</span>
+                                  <span className="text-emerald-300 font-semibold">{es}</span>
+                                </div>
+                                <button
+                                  onClick={() => handleRemoveGlossaryTerm(en)}
+                                  className="p-1 hover:bg-red-950/40 text-slate-500 hover:text-red-400 rounded transition-all cursor-pointer"
+                                  title="Eliminar regla"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Default Rules */}
+                        <div className="space-y-1 pt-2">
+                          <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest px-2 py-1 flex items-center gap-1">
+                            <Info className="w-3 h-3 text-slate-500" />
+                            Glosario Minecraft por Defecto (Protegido)
+                          </div>
+                          {filteredDefaultGlossary.map(([en, es]) => (
+                            <div key={en} className="flex justify-between items-center p-2 bg-white/[0.02] rounded-lg text-[11px] text-slate-400">
+                              <div className="flex items-center gap-3">
+                                <span className="font-medium">{en}</span>
+                                  <span className="text-slate-600">→</span>
+                                  <span className="text-slate-300">{es}</span>
+                                </div>
+                                <span className="text-[9px] text-slate-600 font-semibold uppercase tracking-wider">Sistema</span>
+                              </div>
+                            ))}
+                          </div>
+
+                        {filteredCustomGlossary.length === 0 && filteredDefaultGlossary.length === 0 && (
+                          <div className="text-center p-6 text-slate-500 italic text-xs">
+                            No se encontraron términos que coincidan con la búsqueda.
+                          </div>
+                        )}
+
+                      </div>
+                    </div>
+                  </>
+                )}
 
               </div>
               
