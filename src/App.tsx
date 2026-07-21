@@ -56,6 +56,7 @@ import {
   getDoc
 } from "firebase/firestore";
 import { handleFirestoreError, OperationType } from "./firestoreErrors";
+import LogTerminal from "./components/LogTerminal";
 
 interface TaskStats {
   wordsTranslated: number;
@@ -90,7 +91,16 @@ interface TranslationDiffEntry {
   translated: string;
 }
 
-const API_BASE = "";
+const API_BASE = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".run.app"))
+  ? ""
+  : "https://ais-pre-6fjyrq6hehrxtccdi2555v-312633509664.us-east1.run.app";
+
+const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  return fetch(input, {
+    ...init,
+    credentials: "include",
+  });
+};
 
 export default function App() {
   // Authentication states
@@ -439,7 +449,7 @@ export default function App() {
     // Also fetch default glossary from server once
     const fetchDefaultGlossaryOnly = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/glossary`);
+        const res = await apiFetch(`${API_BASE}/api/glossary`);
         if (res.ok) {
           const data = await res.json();
           setDefaultGlossary(data.defaultGlossary || {});
@@ -456,7 +466,7 @@ export default function App() {
   const fetchTasks = async (userId?: string) => {
     try {
       const url = userId ? `${API_BASE}/api/tasks?userId=${userId}` : `${API_BASE}/api/tasks`;
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       if (res.ok) {
         const data = await res.json();
         const serverTasks: TranslationTask[] = data.tasks || [];
@@ -521,7 +531,7 @@ export default function App() {
 
   const fetchGlossary = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/glossary`);
+      const res = await apiFetch(`${API_BASE}/api/glossary`);
       if (res.ok) {
         const data = await res.json();
         setDefaultGlossary(data.defaultGlossary || {});
@@ -546,7 +556,7 @@ export default function App() {
       }
     } else {
       try {
-        const res = await fetch(`${API_BASE}/api/glossary`, {
+        const res = await apiFetch(`${API_BASE}/api/glossary`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ glossary: updatedGlossary })
@@ -699,7 +709,7 @@ export default function App() {
     formData.append("options", JSON.stringify(options));
 
     try {
-      const res = await fetch(`${API_BASE}/api/translate`, {
+      const res = await apiFetch(`${API_BASE}/api/translate`, {
         method: "POST",
         body: formData
       });
@@ -743,7 +753,7 @@ export default function App() {
     formData.append("options", JSON.stringify(options));
 
     try {
-      const res = await fetch(`${API_BASE}/api/analyze`, {
+      const res = await apiFetch(`${API_BASE}/api/analyze`, {
         method: "POST",
         body: formData
       });
@@ -764,7 +774,7 @@ export default function App() {
 
   const clearFinishedTasks = async () => {
     try {
-      await fetch(`${API_BASE}/api/tasks/clear`, { method: "POST" });
+      await apiFetch(`${API_BASE}/api/tasks/clear`, { method: "POST" });
     } catch (err) {
       console.error("Error al limpiar tareas en memoria:", err);
     }
@@ -1650,20 +1660,11 @@ export default function App() {
 
                         {/* Collapsible logs terminal */}
                         {expandedLogs[task.id] && (
-                          <div className="mt-3 p-3 bg-[#08090a] rounded-lg border border-white/5 max-h-48 overflow-y-auto font-mono text-[10px] text-slate-400 space-y-1 scrollbar-thin scrollbar-thumb-slate-800">
-                            <div className="text-slate-500 text-[9px] uppercase font-bold tracking-wider mb-2 border-b border-white/5 pb-1">CONSOLA DE DEPURACIÓN</div>
-                            {task.logs.length === 0 && <div className="text-slate-500 italic">No hay logs de ejecución aún.</div>}
-                            {task.logs.map((logLine, idx) => (
-                              <div key={idx} className="leading-relaxed hover:bg-white/5 p-0.5 rounded transition-all">
-                                {logLine}
-                              </div>
-                            ))}
-                            {task.errors.map((errLine, idx) => (
-                              <div key={`err-${idx}`} className="text-red-400 font-semibold bg-red-950/20 px-1 py-0.5 rounded">
-                                [ERROR] {errLine}
-                              </div>
-                            ))}
-                          </div>
+                          <LogTerminal
+                            logs={task.logs}
+                            errors={task.errors}
+                            status={task.status}
+                          />
                         )}
 
                         {/* Comparative Diff View Panel */}

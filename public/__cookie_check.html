@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verificando Sesión...</title>
+  <style>
+    body {
+      background-color: #0d0f11;
+      color: #94a3b8;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .loader-container {
+      text-align: center;
+    }
+    .spinner {
+      margin: 0 auto 1.5rem auto;
+      width: 40px;
+      height: 40px;
+      border: 4px solid #1e293b;
+      border-top: 4px solid #4f46e5;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    h1 {
+      font-size: 1.25rem;
+      color: #f1f5f9;
+      margin-bottom: 0.5rem;
+    }
+    p {
+      font-size: 0.875rem;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="loader-container">
+    <div class="spinner"></div>
+    <h1>Verificando credenciales de AI Studio</h1>
+    <p>Redirigiendo al servidor de autenticación seguro...</p>
+  </div>
+
+  <script>
+    // Extract query parameters
+    const params = new URLSearchParams(window.location.search);
+    const returnUrl = params.get('return_url');
+    
+    // Build real target URL to the AI Studio preview cookie verification page
+    const targetUrl = new URL('https://ais-pre-6fjyrq6hehrxtccdi2555v-312633509664.us-east1.run.app/__cookie_check.html');
+    if (returnUrl) {
+      targetUrl.searchParams.set('return_url', returnUrl);
+    }
+    
+    // Redirect to the real authentication handler
+    window.location.href = targetUrl.toString();
+  </script>
+</body>
+</html>
