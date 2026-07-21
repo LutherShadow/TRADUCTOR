@@ -29,7 +29,8 @@ import {
   Bell,
   BellRing,
   Eye,
-  EyeOff
+  EyeOff,
+  User as UserIcon
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { auth, googleProvider, db } from "./firebase";
@@ -414,13 +415,12 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Sync tasks from Firestore (realtime) if logged in, else poll server in-memory
+  // Sync tasks from Firestore (realtime) ONLY if logged in. Stop polling when logged out.
   useEffect(() => {
     if (authLoading) return;
     if (!user) {
-      fetchTasks();
-      const interval = setInterval(() => fetchTasks(), 1500);
-      return () => clearInterval(interval);
+      setTasks([]);
+      return;
     }
 
     const tasksRefCollection = collection(db, "users", user.uid, "tasks");
@@ -436,9 +436,9 @@ export default function App() {
       handleFirestoreError(error, OperationType.GET, `users/${user.uid}/tasks`);
     });
 
-    // Also run a client-side polling sync loop to fetch from server and save to Firestore
+    // Client-side polling sync loop to fetch from server and save to Firestore for active user
     fetchTasks(user.uid);
-    const interval = setInterval(() => fetchTasks(user.uid), 2000);
+    const interval = setInterval(() => fetchTasks(user.uid), 3000);
 
     return () => {
       unsubscribe();
@@ -483,11 +483,12 @@ export default function App() {
     prevTasksRef.current = currentStatuses;
   }, [tasks]);
 
-  // Sync custom glossary from Firestore (realtime) if logged in, else load from server
+  // Sync custom glossary from Firestore (realtime) if logged in, clear if logged out
   useEffect(() => {
     if (authLoading) return;
     if (!user) {
-      fetchGlossary();
+      setCustomGlossary({});
+      setDefaultGlossary({});
       return;
     }
 
@@ -503,32 +504,27 @@ export default function App() {
       handleFirestoreError(error, OperationType.GET, `users/${user.uid}/settings/glossary`);
     });
 
-    // Also fetch default glossary from server once
-    const fetchDefaultGlossaryOnly = async () => {
-      try {
-        const res = await apiFetch(`${API_BASE}/api/glossary`);
-        if (res.ok) {
-          const data = await res.json();
-          setDefaultGlossary(data.defaultGlossary || {});
-        }
-      } catch (err) {
-        console.error("Error fetching default glossary:", err);
-      }
-    };
-    fetchDefaultGlossaryOnly();
+    fetchGlossary();
 
     return () => unsubscribe();
   }, [user, authLoading]);
 
   const fetchTasks = async (userId?: string) => {
+    const targetUserId = userId || user?.uid;
+    // Disable task fetching when logged out / unauthenticated
+    if (!targetUserId) {
+      setTasks([]);
+      return;
+    }
+
     try {
-      const url = userId ? `${API_BASE}/api/tasks?userId=${userId}` : `${API_BASE}/api/tasks`;
+      const url = `${API_BASE}/api/tasks?userId=${targetUserId}`;
       const res = await apiFetch(url);
       if (res.ok) {
         const data = await res.json();
         const serverTasks: TranslationTask[] = data.tasks || [];
         
-        if (userId && serverTasks.length > 0) {
+        if (serverTasks.length > 0) {
           serverTasks.forEach((task) => {
             const localTask = tasksRef.current.find(t => t.id === task.id);
             if (!localTask || 
@@ -539,10 +535,10 @@ export default function App() {
                 JSON.stringify(localTask.errors) !== JSON.stringify(task.errors) ||
                 localTask.downloadUrl !== task.downloadUrl
             ) {
-              const taskDocRef = doc(db, "users", userId, "tasks", task.id);
+              const taskDocRef = doc(db, "users", targetUserId, "tasks", task.id);
               const cleanTask: any = {
                 id: task.id,
-                userId: userId,
+                userId: targetUserId,
                 originalName: task.originalName || "",
                 translatedName: task.translatedName || "",
                 status: task.status || "queued",
@@ -576,10 +572,6 @@ export default function App() {
             }
           });
         }
-        
-        if (!userId) {
-          setTasks(serverTasks);
-        }
       }
     } catch (err) {
       console.error("Error al consultar tareas de traducción:", err);
@@ -587,6 +579,7 @@ export default function App() {
   };
 
   const fetchGlossary = async () => {
+    if (!user) return;
     try {
       const res = await apiFetch(`${API_BASE}/api/glossary`);
       if (res.ok) {
@@ -789,6 +782,16 @@ export default function App() {
   };
 
   const uploadFiles = async (filesToUpload: File[]) => {
+    if (!user) {
+      addCustomToast(
+        "Inicio de Sesión Requerido",
+        "Por favor inicia sesión con tu cuenta de Google para subir y traducir mods de Minecraft.",
+        "info"
+      );
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
     setIsUploading(true);
     setUploadError(null);
 
@@ -797,9 +800,7 @@ export default function App() {
       formData.append("files", file);
     });
 
-    if (user) {
-      formData.append("userId", user.uid);
-    }
+    formData.append("userId", user.uid);
 
     // Append our selection options as a JSON string
     const options = {
@@ -828,8 +829,8 @@ export default function App() {
         throw new Error(errData.error || "Error al subir los archivos.");
       }
 
-      // Refresh immediately
-      fetchTasks(user?.uid);
+      // Refresh immediately for the logged in user
+      fetchTasks(user.uid);
     } catch (err: any) {
       setUploadError(err.message || "Error al procesar archivos.");
     } finally {
@@ -839,6 +840,15 @@ export default function App() {
   };
 
   const runPreAnalysis = async (file: File) => {
+    if (!user) {
+      addCustomToast(
+        "Inicio de Sesión Requerido",
+        "Por favor inicia sesión con tu cuenta para pre-analizar mods de Minecraft.",
+        "info"
+      );
+      return;
+    }
+
     setIsAnalyzing(true);
     setAnalysisError(null);
     setAnalysisResult(null);
@@ -882,24 +892,22 @@ export default function App() {
   };
 
   const clearFinishedTasks = async () => {
+    if (!user) return;
+
     try {
-      await apiFetch(`${API_BASE}/api/tasks/clear`, { method: "POST" });
+      await apiFetch(`${API_BASE}/api/tasks/clear?userId=${user.uid}`, { method: "POST" });
     } catch (err) {
       console.error("Error al limpiar tareas en memoria:", err);
     }
 
-    if (user) {
-      try {
-        const completedOrFailed = tasks.filter(t => t.status === "completed" || t.status === "failed");
-        for (const t of completedOrFailed) {
-          const taskDocRef = doc(db, "users", user.uid, "tasks", t.id);
-          await deleteDoc(taskDocRef);
-        }
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/tasks/*`);
+    try {
+      const completedOrFailed = tasks.filter(t => t.status === "completed" || t.status === "failed");
+      for (const t of completedOrFailed) {
+        const taskDocRef = doc(db, "users", user.uid, "tasks", t.id);
+        await deleteDoc(taskDocRef);
       }
-    } else {
-      fetchTasks();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/tasks/*`);
     }
   };
 
@@ -1389,6 +1397,27 @@ export default function App() {
           <div className="lg:col-span-8 space-y-6">
             
             {/* Drag & Drop Card styled exactly like the Immersive UI design */}
+            {!user && (
+              <div className="mb-4 p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-xl flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-indigo-500/20 rounded-lg text-indigo-400">
+                    <UserIcon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-white">Sesión requerida</h4>
+                    <p className="text-[11px] text-slate-400">Inicia sesión con Google para subir mods, iniciar traducciones y ver tu lista de tareas.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSignIn}
+                  className="px-4 py-1.5 bg-indigo-500 hover:bg-indigo-400 text-white font-bold rounded-lg text-xs transition-all shrink-0 cursor-pointer shadow-md shadow-indigo-500/20"
+                >
+                  Iniciar Sesión
+                </button>
+              </div>
+            )}
+
             <div
               onDragEnter={handleDrag}
               onDragOver={handleDrag}
@@ -1399,7 +1428,13 @@ export default function App() {
                   ? "border-emerald-500 bg-emerald-500/5" 
                   : "border-white/10 hover:border-emerald-500/40 hover:bg-emerald-500/5"
               }`}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                if (!user) {
+                  handleSignIn();
+                } else {
+                  fileInputRef.current?.click();
+                }
+              }}
             >
               <input
                 ref={fileInputRef}
