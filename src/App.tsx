@@ -52,7 +52,8 @@ import {
   setDoc, 
   deleteDoc, 
   query, 
-  orderBy 
+  orderBy,
+  getDoc
 } from "firebase/firestore";
 import { handleFirestoreError, OperationType } from "./firestoreErrors";
 
@@ -299,13 +300,26 @@ export default function App() {
       if (currentUser) {
         // Sync user profile details in Firestore
         const userDocRef = doc(db, "users", currentUser.uid);
-        setDoc(userDocRef, {
-          uid: currentUser.uid,
-          email: currentUser.email,
-          displayName: currentUser.displayName || "",
-          photoURL: currentUser.photoURL || "",
-          createdAt: new Date().toISOString()
-        }, { merge: true }).catch(err => {
+        getDoc(userDocRef).then((docSnap) => {
+          if (!docSnap.exists()) {
+            // New user: Set all fields including createdAt
+            return setDoc(userDocRef, {
+              uid: currentUser.uid,
+              email: currentUser.email || "",
+              displayName: currentUser.displayName || "",
+              photoURL: currentUser.photoURL || "",
+              createdAt: new Date().toISOString()
+            });
+          } else {
+            // Existing user: Merge profile updates without changing createdAt
+            return setDoc(userDocRef, {
+              uid: currentUser.uid,
+              email: currentUser.email || "",
+              displayName: currentUser.displayName || "",
+              photoURL: currentUser.photoURL || ""
+            }, { merge: true });
+          }
+        }).catch(err => {
           console.error("Error syncing user profile:", err);
         });
       }

@@ -34,13 +34,13 @@ const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
 // Initialize Firebase Admin
-admin.initializeApp({
+const adminApp = admin.initializeApp({
   projectId: firebaseConfig.projectId
 });
 
 const dbAdmin = firebaseConfig.firestoreDatabaseId 
-  ? getFirestore(firebaseConfig.firestoreDatabaseId)
-  : getFirestore();
+  ? getFirestore(adminApp, firebaseConfig.firestoreDatabaseId)
+  : getFirestore(adminApp);
 
 // Helper to sync translation task state to Firestore under /users/{userId}/tasks/{taskId}
 async function syncTaskToFirestore(userId: string | undefined, task: TranslationTask) {

@@ -438,22 +438,49 @@ ${glossaryText}
 
     // Default to Gemini API
     const ai = getAi();
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: JSON.stringify(batch),
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          description: "A dictionary with the translated values in Spanish, preserving the exact keys from the input.",
-        }
-      }
-    });
+    let response;
+    let attempts = 0;
+    const maxAttempts = 5;
+    const initialDelayMs = 3000;
 
-    const text = response.text?.trim();
+    while (attempts < maxAttempts) {
+      try {
+        response = await ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: JSON.stringify(batch),
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              description: "A dictionary with the translated values in Spanish, preserving the exact keys from the input.",
+            }
+          }
+        });
+        break; // Success, exit retry loop
+      } catch (err: any) {
+        attempts++;
+        const errMsg = err.message || JSON.stringify(err);
+        const isRateLimit = errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("quota");
+        
+        if (attempts >= maxAttempts) {
+          throw err; // Re-throw if all attempts exhausted
+        }
+        
+        let waitMs = initialDelayMs * Math.pow(2, attempts - 1) + Math.random() * 1000;
+        if (isRateLimit) {
+          // If rate-limited, wait even longer to let quota reset
+          waitMs += 10000;
+        }
+        
+        logFn(`[Intento ${attempts}/${maxAttempts}] Rate limit o error con Gemini API: ${errMsg.substring(0, 150)}. Esperando ${Math.round(waitMs / 1000)}s antes de reintentar...`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+      }
+    }
+
+    const text = response?.text?.trim();
     if (!text) {
-      throw new Error("La respuesta de Gemini está vacía.");
+      throw new Error("La respuesta de Gemini está vacía o no es válida.");
     }
 
     const result = JSON.parse(text) as Record<string, string>;
