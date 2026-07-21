@@ -90,9 +90,7 @@ interface TranslationDiffEntry {
   translated: string;
 }
 
-const API_BASE = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".run.app"))
-  ? ""
-  : "https://ais-pre-6fjyrq6hehrxtccdi2555v-312633509664.us-east1.run.app";
+const API_BASE = "";
 
 export default function App() {
   // Authentication states
