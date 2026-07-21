@@ -6,6 +6,7 @@ import {
   Languages, 
   BookOpen, 
   ShieldAlert, 
+  Cookie, 
   CheckCircle2, 
   Loader2, 
   Plus, 
@@ -95,17 +96,63 @@ const API_BASE = typeof window !== "undefined" && (window.location.hostname === 
   ? ""
   : "https://ais-pre-6fjyrq6hehrxtccdi2555v-312633509664.us-east1.run.app";
 
-const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  return fetch(input, {
-    ...init,
-    credentials: "include",
-  });
+const apiFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  let urlString = typeof input === "string" ? input : (input as any).toString();
+  
+  // Intercept relative cookie-checks and route them to the active API base
+  if (urlString.includes("__cookie_check.html") && !urlString.startsWith("http")) {
+    urlString = `${API_BASE}${urlString}`;
+  }
+
+  try {
+    const res = await fetch(urlString, {
+      ...init,
+      redirect: "manual", // Intercept 302 redirects to prevent browser fetch CORS crashes
+      credentials: "include",
+    });
+
+    // In cross-origin manual redirect mode, a 302/307 redirect results in status 0
+    if (res.status === 0 || res.status === 302 || res.status === 307) {
+      if (typeof window !== "undefined" && (window as any).setCookieAuthRequired) {
+        (window as any).setCookieAuthRequired(true);
+      }
+      throw new Error("Se requiere verificación de cookies de seguridad de AI Studio");
+    }
+
+    return res;
+  } catch (error: any) {
+    // If a request fails due to a CORS redirect failure, trigger the cookie authorization flow
+    if (error instanceof TypeError && error.message.includes("Failed to fetch")) {
+      if (typeof window !== "undefined" && (window as any).setCookieAuthRequired) {
+        (window as any).setCookieAuthRequired(true);
+      }
+    }
+    throw error;
+  }
 };
 
 export default function App() {
   // Authentication states
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [requiresCookieAuth, setRequiresCookieAuth] = useState(false);
+
+  // Close the popup window if we are inside the cookie check redirect callback
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("cookie_auth_callback") === "true") {
+        if (window.opener) {
+          try {
+            window.opener.postMessage({ type: "cookie_auth_success" }, "*");
+          } catch (e) {
+            console.error("Failed to post message to opener:", e);
+          }
+          window.close();
+        }
+      }
+    }
+  }, []);
 
   // State for Tasks
   const [tasks, setTasks] = useState<TranslationTask[]>([]);
@@ -542,6 +589,58 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    // Expose callback for apiFetch to trigger state changes
+    (window as any).setCookieAuthRequired = (required: boolean) => {
+      setRequiresCookieAuth(required);
+    };
+
+    // Global event listeners to suppress and handle cookie loading and relative configuration 404/CORS errors
+    const handleGlobalError = (event: ErrorEvent) => {
+      const msg = event.message || "";
+      const errorMsg = event.error?.message || "";
+      if (msg.includes("__cookie_check.html") || errorMsg.includes("__cookie_check.html")) {
+        event.preventDefault(); // Mute browser default console crash
+        setRequiresCookieAuth(true);
+      }
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      const msg = reason ? (reason.message || String(reason)) : "";
+      if (msg.includes("__cookie_check.html") || msg.includes("Failed to fetch") || msg.includes("verificación de cookies")) {
+        event.preventDefault(); // Suppress and capture relative path config crashes
+        setRequiresCookieAuth(true);
+      }
+    };
+
+    window.addEventListener("error", handleGlobalError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    // Listens for postMessage signals from the authentication popup
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === "cookie_auth_success") {
+        setRequiresCookieAuth(false);
+        addCustomToast(
+          "Autenticación Exitosa",
+          "Las cookies de seguridad de AI Studio han sido verificadas. Se ha restaurado la sincronización en tiempo real.",
+          "success"
+        );
+        fetchGlossary();
+        fetchTasks(user?.uid);
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+
+    return () => {
+      delete (window as any).setCookieAuthRequired;
+      window.removeEventListener("error", handleGlobalError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+      window.removeEventListener("message", handleMessage);
+    };
+  }, [user]);
+
   const saveCustomGlossary = async (updatedGlossary: Record<string, string>) => {
     if (user) {
       try {
@@ -825,6 +924,52 @@ export default function App() {
       {/* Main Container */}
       <div className="max-w-7xl mx-auto px-4 py-8 relative z-10">
         
+        {requiresCookieAuth && (
+          <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-in fade-in slide-in-from-top-4 duration-300">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-amber-500/20 rounded-lg text-amber-400 shrink-0 mt-0.5">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white">Se requiere habilitar cookies de sesión</h4>
+                <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                  Para sincronizar tus archivos y traducir con total estabilidad, tu navegador debe autorizar las cookies seguras de AI Studio. Haz clic abajo para permitir el acceso.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0 self-end sm:self-center">
+              <button
+                type="button"
+                onClick={() => {
+                  const authUrl = `${API_BASE}/__cookie_check.html?return_url=${encodeURIComponent(
+                    window.location.origin + window.location.pathname + "?cookie_auth_callback=true"
+                  )}`;
+                  const width = 600;
+                  const height = 650;
+                  const left = window.screenX + (window.outerWidth - width) / 2;
+                  const top = window.screenY + (window.outerHeight - height) / 2;
+                  window.open(
+                    authUrl,
+                    "aistudio_cookie_auth",
+                    `width=${width},height=${height},left=${left},top=${top}`
+                  );
+                }}
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-amber-500/10 hover:shadow-amber-500/20"
+              >
+                <Cookie className="w-3.5 h-3.5" />
+                Aceptar Cookies y Autorizar
+              </button>
+              <button
+                type="button"
+                onClick={() => setRequiresCookieAuth(false)}
+                className="px-3 py-2 bg-white/5 hover:bg-white/10 border border-white/5 hover:border-white/10 rounded-xl text-xs font-semibold text-slate-400 hover:text-slate-200 transition-all cursor-pointer"
+              >
+                Ignorar
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Top Navigation Bar styled from the Immersive UI design */}
         <header className="h-16 bg-[#0d0f11]/80 backdrop-blur-md border border-white/5 flex items-center justify-between px-6 z-10 rounded-2xl mb-8">
           <div className="flex items-center gap-3">
