@@ -709,17 +709,33 @@ export default function App() {
 
   const handleDeleteTask = async (taskId: string) => {
     try {
-      const res = await apiFetch(`${API_BASE}/api/tasks/${taskId}?userId=${user?.uid || ''}`, {
+      // 1. Delete from server
+      await apiFetch(`${API_BASE}/api/tasks/${taskId}?userId=${user?.uid || ''}`, {
         method: "DELETE"
       });
-      if (res.ok) {
-        setTasks(prev => prev.filter(t => t.id !== taskId));
-        addCustomToast("Tarea Eliminada", "Se eliminó la tarea correctamente.", "info");
-      } else {
-        throw new Error("Error al eliminar la tarea.");
+
+      // 2. If logged in with Firebase, delete task document from Firestore
+      if (user) {
+        try {
+          const taskDocRef = doc(db, "users", user.uid, "tasks", taskId);
+          await deleteDoc(taskDocRef);
+        } catch (fErr) {
+          console.warn("Error al borrar documento de tarea en Firestore:", fErr);
+        }
       }
+
+      setTasks(prev => prev.filter(t => t.id !== taskId));
+      addCustomToast("Tarea Eliminada", "Se eliminó la tarea de la cola de procesamiento.", "info");
     } catch (err: any) {
-      addCustomToast("Error al Eliminar", err.message || "No se pudo eliminar la tarea.", "error");
+      // Fallback: update local UI and attempt Firestore deletion if network error
+      if (user) {
+        try {
+          const taskDocRef = doc(db, "users", user.uid, "tasks", taskId);
+          await deleteDoc(taskDocRef);
+        } catch (fErr) {}
+      }
+      setTasks(prev => prev.filter(t => t.id !== taskId));
+      addCustomToast("Tarea Eliminada", "Se eliminó la tarea localmente.", "info");
     }
   };
 

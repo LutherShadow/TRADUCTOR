@@ -363,6 +363,85 @@ app.post("/api/tasks/clear", (req, res) => {
   res.json({ success: true, tasks: Object.values(tasks) });
 });
 
+// 3b. Stop a specific task
+app.post("/api/tasks/stop/:taskId", async (req, res) => {
+  const { taskId } = req.params;
+  const userId = req.body?.userId || (req.query.userId as string | undefined);
+
+  // Remove from pending queue if present
+  const queueIdx = taskQueue.indexOf(taskId);
+  if (queueIdx !== -1) {
+    taskQueue.splice(queueIdx, 1);
+  }
+
+  const task = tasks[taskId];
+  if (task) {
+    task.status = "failed";
+    task.logs = [...(task.logs || []), "[INFO] Traducción detenida por el usuario."];
+    if (!task.errors.includes("Proceso detenido por el usuario.")) {
+      task.errors.push("Proceso detenido por el usuario.");
+    }
+    await syncTaskToFirestore(userId || (task as any)._userId, task);
+  } else if (userId) {
+    try {
+      const docRef = dbAdmin.collection("users").doc(userId).collection("tasks").doc(taskId);
+      const docSnap = await docRef.get();
+      if (docSnap.exists) {
+        await docRef.update({
+          status: "failed",
+          errors: ["Proceso detenido por el usuario."],
+          updatedAt: new Date().toISOString()
+        });
+      }
+    } catch (e: any) {
+      console.error(`Error al actualizar estado en Firestore para tarea ${taskId}:`, e);
+    }
+  }
+
+  res.json({ success: true, message: "Tarea detenida correctamente." });
+});
+
+// 3c. Delete a specific task
+app.delete("/api/tasks/:taskId", async (req, res) => {
+  const { taskId } = req.params;
+  const userId = req.query.userId as string | undefined;
+
+  // Remove from pending queue if present
+  const queueIdx = taskQueue.indexOf(taskId);
+  if (queueIdx !== -1) {
+    taskQueue.splice(queueIdx, 1);
+  }
+
+  const task = tasks[taskId];
+  if (task) {
+    // Clean up files
+    if (task.translatedName) {
+      const outPath = path.join(OUTPUTS_DIR, task.translatedName);
+      try {
+        if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+      } catch (e) {}
+    }
+    const origPath = (task as any)._originalFilePath;
+    if (origPath) {
+      try {
+        if (fs.existsSync(origPath)) fs.unlinkSync(origPath);
+      } catch (e) {}
+    }
+    delete tasks[taskId];
+  }
+
+  // Delete from Firestore if userId provided
+  if (userId) {
+    try {
+      await dbAdmin.collection("users").doc(userId).collection("tasks").doc(taskId).delete();
+    } catch (e: any) {
+      console.error(`Error al borrar tarea de Firestore para ${taskId}:`, e);
+    }
+  }
+
+  res.json({ success: true, message: "Tarea eliminada correctamente." });
+});
+
 // 4. Download a single translated mod JAR
 app.get("/api/download/:taskId", async (req, res) => {
   const { taskId } = req.params;
