@@ -279,7 +279,7 @@ export default function App() {
   }>>([]);
   const [isAnalyzingDiff, setIsAnalyzingDiff] = useState<boolean>(false);
 
-  const defaultOpenRouterKey = import.meta.env.VITE_OPENROUTER_API_KEY || "";
+  const defaultOpenRouterKey = ((import.meta as any).env?.VITE_OPENROUTER_API_KEY as string) || "";
 
   const [customApiKeys, setCustomApiKeys] = useState<Record<string, string>>(() => {
     try {
