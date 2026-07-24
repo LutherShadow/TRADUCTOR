@@ -13,6 +13,7 @@ import {
   DEFAULT_GLOSSARY 
 } from "./src/translationEngine";
 import admin from "firebase-admin";
+import { cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
 const app = express();
@@ -39,10 +40,29 @@ app.use((req, res, next) => {
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
-// Initialize Firebase Admin
-const adminApp = admin.initializeApp({
-  projectId: firebaseConfig.projectId
-});
+// Initialize Firebase Admin with optional custom Service Account Key credential
+let adminApp: ReturnType<typeof admin.initializeApp>;
+if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+  try {
+    const serviceAccount = typeof process.env.FIREBASE_SERVICE_ACCOUNT_KEY === "string"
+      ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)
+      : process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+    adminApp = admin.initializeApp({
+      credential: cert(serviceAccount),
+      projectId: firebaseConfig.projectId
+    });
+    console.log("[Firebase Admin] Inicializado con clave de cuenta de servicio personalizada.");
+  } catch (err) {
+    console.warn("[Firebase Admin] Error al parsear FIREBASE_SERVICE_ACCOUNT_KEY, usando inicialización por defecto:", err);
+    adminApp = admin.initializeApp({
+      projectId: firebaseConfig.projectId
+    });
+  }
+} else {
+  adminApp = admin.initializeApp({
+    projectId: firebaseConfig.projectId
+  });
+}
 
 const dbAdmin = firebaseConfig.firestoreDatabaseId 
   ? getFirestore(adminApp, firebaseConfig.firestoreDatabaseId)
