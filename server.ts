@@ -394,7 +394,7 @@ app.post("/api/tasks/stop/:taskId", async (req, res) => {
         });
       }
     } catch (e: any) {
-      console.error(`Error al actualizar estado en Firestore para tarea ${taskId}:`, e);
+      console.warn(`[Firestore Sync Notice] Server-side direct task stop for ${taskId} skipped/lacked permissions (Client handles sync): ${e.message || e}`);
     }
   }
 
@@ -435,7 +435,7 @@ app.delete("/api/tasks/:taskId", async (req, res) => {
     try {
       await dbAdmin.collection("users").doc(userId).collection("tasks").doc(taskId).delete();
     } catch (e: any) {
-      console.error(`Error al borrar tarea de Firestore para ${taskId}:`, e);
+      console.warn(`[Firestore Sync Notice] Server-side direct task deletion for ${taskId} skipped/lacked permissions (Client handles sync): ${e.message || e}`);
     }
   }
 
@@ -454,8 +454,8 @@ app.get("/api/download/:taskId", async (req, res) => {
       if (docSnap.exists) {
         task = docSnap.data() as TranslationTask;
       }
-    } catch (e) {
-      console.error("Error al cargar tarea de Firestore para descarga:", e);
+    } catch (e: any) {
+      console.warn(`[Firestore Sync Notice] Could not read task ${taskId} from server Firestore: ${e.message || e}`);
     }
   }
 
@@ -485,8 +485,8 @@ app.get("/api/download-all", async (req, res) => {
       querySnap.forEach((doc: any) => {
         completedTasks.push(doc.data() as TranslationTask);
       });
-    } catch (e) {
-      console.error("Error al consultar tareas completadas de Firestore:", e);
+    } catch (e: any) {
+      console.warn(`[Firestore Sync Notice] Could not read completed tasks from server Firestore: ${e.message || e}`);
     }
   }
 
