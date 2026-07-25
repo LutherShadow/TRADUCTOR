@@ -340,8 +340,8 @@ function cleanTranslationPunctuation(str: string): string {
   if (!str || typeof str !== "string") return str;
   return str
     .replace(/§\s+([a-fk-or0-9])/gi, "§$1") // Fix spaced section formatting, e.g., § a -> §a
-    .replace(/%\s+([sddf])/gi, "%$1")       // Fix spaced percent, e.g., % s -> %s
-    .replace(/%\s*(\d+)\s*\$\s*([sddf])/gi, "%$1$$$2") // Fix spaced parameter variables, e.g., % 1 $ s -> %1$s
+    .replace(/%\s+([sdfbincx])(?![a-záéíóúñÁÉÍÓÚÑ])/gi, "%$1") // Fix spaced percent specifiers e.g. % s -> %s, but NOT % daño or % de
+    .replace(/%\s*(\d+)\s*\$\s*([sdfbincx])(?![a-záéíóúñÁÉÍÓÚÑ])/gi, "%$1$$$2") // Fix spaced parameter variables, e.g., % 1 $ s -> %1$s
     .replace(/{\s*([^}]+)\s*}/g, "{$1}");   // Fix spaced braces, e.g., { player } -> {player}
 }
 
@@ -533,7 +533,26 @@ export function postProcessMinecraftTranslation(
     result = result.replace(/\bLucios\b/gi, "Picas");
   }
 
-  // 5. Apply glossary entries sorted by key length descending
+  // 6. Fix percentage spacing, typos (e.g. "laño" -> "daño"), and concatenated stats
+  // Fix "laño" or "laños" mistranslation/typo for "daño" / "daños"
+  result = result.replace(/\b(l|L)año(s)?\b/g, (m, p1, p2) => (p1 === "L" ? "D" : "d") + "año" + (p2 || ""));
+  
+  // Fix missing spaces after % before letters (e.g., "160%daño" -> "160% daño", "100%de" -> "100% de")
+  result = result.replace(/(\d+%|%)([a-záéíóúñÁÉÍÓÚÑ])/gi, "$1 $2");
+
+  // Fix missing space after colon in stat lines (e.g., "Daño:160%" -> "Daño: 160%")
+  result = result.replace(/([a-záéíóúñÁÉÍÓÚÑ]):([a-záéíóúñÁÉÍÓÚÑ0-9\+]+)/gi, "$1: $2");
+
+  // Fix missing space after + or - signs when followed by a number/percent and word
+  result = result.replace(/(\+|\-)\s*(\d+%?)\s*([a-záéíóúñÁÉÍÓÚÑ])/gi, "$1$2 $3");
+
+  // Fix common Apotheosis / RPG attribute typos and accents
+  result = result.replace(/\bgolpe\s+critico\b/gi, "golpe crítico");
+  result = result.replace(/\bdaño\s+critico\b/gi, "daño crítico");
+  result = result.replace(/\balcanse\b/gi, "alcance");
+  result = result.replace(/\broba\s+de\s+vida\b/gi, "robo de vida");
+
+  // 7. Apply glossary entries sorted by key length descending
   const sortedGlossary = Object.entries(glossary || {}).sort((a, b) => b[0].length - a[0].length);
   for (const [enTerm, esTerm] of sortedGlossary) {
     if (!enTerm) continue;
@@ -604,13 +623,15 @@ MINECRAFT LOCALIZATION & PROPER NOUN LOGIC:
   * "Ender Chest" -> "Cofre de Ender"
   * "Ender Pearl" -> "Perla de Ender"
   * "End Rod" -> "Varilla del End"
-- Standard Crafting Terms:
+- Standard Crafting Terms & RPG Stats:
   * "Rod" -> "Varilla" / "Vara"
   * "Ingot" -> "Lingote"
   * "Nugget" -> "Pepita"
   * "Ore" -> "Mena"
   * "Raw" -> "Bruto"
   * Equipment: "Pico", "Hacha", "Pala", "Azada", "Espada", "Casco", "Peto", "Grebas", "Botas"
+  * Percentages & Stats (e.g. Apotheosis, RPG mods): ALWAYS keep a clear space between '%' and words (e.g., "+160% de daño adicional" or "160% daño adicional", NEVER "160%daño" or "160%laño").
+  * Use "daño" for damage (NEVER "laño"). Keep proper spacing after colons and symbols (e.g., "Daño de ataque: +5", "Probabilidad de golpe crítico").
 
 STRICT RULES:
 1. Preserve all variables, placeholders, formatting tags, and color codes EXACTLY in their correct positions. Examples:
