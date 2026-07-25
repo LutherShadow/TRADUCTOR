@@ -321,29 +321,34 @@ ${styleDescription}
 6. You MUST return a JSON object with the exact same keys as the input. Do NOT omit any keys or alter their names. Output ONLY the valid JSON object.`;
 
   try {
-    if (engine === "google_free") {
+    if (engine === "google_free" || options.apiEngine === "google_free") {
       const finalResult: Record<string, string> = {};
       const targetCode = targetLangName.toLowerCase().includes("mx") ? "es" : "es";
       
-      await Promise.all(
-        keys.map(async (key) => {
-          const originalText = batch[key];
-          try {
-            let translated = await translateFreeGoogle(originalText, targetCode);
-            translated = cleanTranslationPunctuation(translated);
-            
-            // Post-apply glossary to enforce key words in free translate
-            for (const [enTerm, esTerm] of Object.entries(glossary)) {
-              const regex = new RegExp(`\\b${enTerm}\\b`, "gi");
-              translated = translated.replace(regex, esTerm);
+      // Process in small controlled sequential slices of 5 keys to prevent rate limits
+      const sliceSize = 5;
+      for (let i = 0; i < keys.length; i += sliceSize) {
+        const sliceKeys = keys.slice(i, i + sliceSize);
+        await Promise.all(
+          sliceKeys.map(async (key) => {
+            const originalText = batch[key];
+            try {
+              let translated = await translateFreeGoogle(originalText, targetCode);
+              translated = cleanTranslationPunctuation(translated);
+              
+              // Post-apply glossary to enforce key words in free translate
+              for (const [enTerm, esTerm] of Object.entries(glossary)) {
+                const regex = new RegExp(`\\b${enTerm}\\b`, "gi");
+                translated = translated.replace(regex, esTerm);
+              }
+              finalResult[key] = translated;
+            } catch (e: any) {
+              logFn(`Advertencia: Falló Google gratis para "${originalText}". Usando original.`);
+              finalResult[key] = originalText;
             }
-            finalResult[key] = translated;
-          } catch (e: any) {
-            logFn(`Advertencia: Falló Google gratis para "${originalText}". Usando original.`);
-            finalResult[key] = originalText;
-          }
-        })
-      );
+          })
+        );
+      }
       return finalResult;
     }
 
@@ -450,8 +455,8 @@ ${styleDescription}
     const ai = getAi();
     let response;
     let attempts = 0;
-    const maxAttempts = 5;
-    const initialDelayMs = 3000;
+    const maxAttempts = 3; // Fast failover to Google Translate if quota reached
+    const initialDelayMs = 2000;
 
     while (attempts < maxAttempts) {
       try {
@@ -471,19 +476,14 @@ ${styleDescription}
       } catch (err: any) {
         attempts++;
         const errMsg = err.message || JSON.stringify(err);
-        const isRateLimit = errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("quota");
+        const isQuota = errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("quota") || errMsg.includes("402");
         
-        if (attempts >= maxAttempts) {
-          throw err; // Re-throw if all attempts exhausted
+        if (attempts >= maxAttempts || isQuota) {
+          throw err; // Re-throw to trigger sub-batching or google_free fallback
         }
         
-        let waitMs = initialDelayMs * Math.pow(2, attempts - 1) + Math.random() * 1000;
-        if (isRateLimit) {
-          // If rate-limited, wait even longer to let quota reset
-          waitMs += 10000;
-        }
-        
-        logFn(`[Intento ${attempts}/${maxAttempts}] Rate limit o error con Gemini API: ${errMsg.substring(0, 150)}. Esperando ${Math.round(waitMs / 1000)}s antes de reintentar...`);
+        const waitMs = initialDelayMs * Math.pow(2, attempts - 1) + Math.random() * 1000;
+        logFn(`[Intento ${attempts}/${maxAttempts}] Error con Gemini API: ${errMsg.substring(0, 150)}. Esperando ${Math.round(waitMs / 1000)}s...`);
         await new Promise(resolve => setTimeout(resolve, waitMs));
       }
     }
@@ -505,8 +505,32 @@ ${styleDescription}
     }
     return finalResult;
   } catch (error: any) {
-    logFn(`Error en lote de traducción con motor ${engine}: ${error.message || error}`);
-    return batch;
+    const errorStr = error?.message || String(error);
+    const isTokenOrQuota = errorStr.includes("402") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("RESOURCE_EXHAUSTED") || errorStr.includes("credits") || errorStr.includes("tokens");
+
+    // 1. If batch is large (>5), try fragmenting into smaller sub-batches first
+    if (keys.length > 5 && !isTokenOrQuota) {
+      logFn(`[Aviso] Error en lote con motor ${engine} (${errorStr.substring(0, 100)}). Fragmentando lote de ${keys.length} elementos en sub-lotes de 5...`);
+      const subResult: Record<string, string> = {};
+      const subKeys = keys;
+      for (let i = 0; i < subKeys.length; i += 5) {
+        const chunkKeys = subKeys.slice(i, i + 5);
+        const chunkBatch: Record<string, string> = {};
+        chunkKeys.forEach(k => { chunkBatch[k] = batch[k]; });
+        const res = await translateBatch(chunkBatch, glossary, targetLangName, options, logFn);
+        Object.assign(subResult, res);
+      }
+      return subResult;
+    }
+
+    // 2. If token/quota exhausted or sub-batch failed, automatically fall back to Google Translate Free!
+    logFn(`[Aviso Automático] Límite de tokens o cuota excedida en motor "${engine}" (${errorStr.substring(0, 120)}). Conmutando automáticamente a Google Translate (Motor Gratis) para completar todas las traducciones.`);
+    
+    // Mutate engine in options so subsequent batches in this task also use google_free
+    options.apiEngine = "google_free";
+
+    // Recursively execute with google_free
+    return await translateBatch(batch, glossary, targetLangName, options, logFn);
   }
 }
 

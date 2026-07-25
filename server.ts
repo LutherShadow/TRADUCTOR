@@ -462,6 +462,88 @@ app.delete("/api/tasks/:taskId", async (req, res) => {
   res.json({ success: true, message: "Tarea eliminada correctamente." });
 });
 
+// 3d. Update engine and resume incomplete/failed tasks
+app.post("/api/tasks/update-engine", async (req, res) => {
+  try {
+    const { userId, apiEngine, openrouterModel, customApiKeys } = req.body;
+    let restartedCount = 0;
+
+    for (const taskId of Object.keys(tasks)) {
+      const task = tasks[taskId];
+      const taskUserId = (task as any)._userId;
+      if (!userId || taskUserId === userId) {
+        if (task.status === "failed" || task.status === "queued" || task.status === "processing") {
+          // Update options inside task
+          if ((task as any)._options) {
+            (task as any)._options.apiEngine = apiEngine || (task as any)._options.apiEngine;
+            if (openrouterModel) (task as any)._options.openrouterModel = openrouterModel;
+            if (customApiKeys) (task as any)._options.customApiKeys = customApiKeys;
+          }
+
+          if (task.status === "failed") {
+            task.status = "queued";
+            task.errors = [];
+            task.logs.push(`[INFO] Reanudando traducción con motor actualizado: ${apiEngine || "Predeterminado"}`);
+            if (!taskQueue.includes(taskId)) {
+              taskQueue.push(taskId);
+            }
+            restartedCount++;
+            await syncTaskToFirestore(userId || taskUserId, task);
+          }
+        }
+      }
+    }
+
+    // Trigger workers
+    for (let i = 0; i < MAX_CONCURRENT_WORKERS; i++) {
+      processQueue();
+    }
+
+    res.json({ success: true, restartedCount });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Error al actualizar motor de traducción." });
+  }
+});
+
+// 3e. Retry a single task
+app.post("/api/tasks/retry/:taskId", async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { userId, apiEngine, openrouterModel, customApiKeys } = req.body;
+
+    const task = tasks[taskId];
+    if (!task) {
+      res.status(404).json({ error: "Tarea no encontrada." });
+      return;
+    }
+
+    if ((task as any)._options) {
+      if (apiEngine) (task as any)._options.apiEngine = apiEngine;
+      if (openrouterModel) (task as any)._options.openrouterModel = openrouterModel;
+      if (customApiKeys) (task as any)._options.customApiKeys = customApiKeys;
+    }
+
+    task.status = "queued";
+    task.errors = [];
+    task.logs.push(`[INFO] Reintentando tarea manualmente con motor: ${apiEngine || "Predeterminado"}`);
+
+    if (!taskQueue.includes(taskId)) {
+      taskQueue.push(taskId);
+    }
+
+    await syncTaskToFirestore(userId || (task as any)._userId, task);
+
+    // Trigger workers
+    for (let i = 0; i < MAX_CONCURRENT_WORKERS; i++) {
+      processQueue();
+    }
+
+    res.json({ success: true, taskId });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Error al reintentar la tarea." });
+  }
+});
+
 // 4. Download a single translated mod JAR
 app.get("/api/download/:taskId", async (req, res) => {
   const { taskId } = req.params;
