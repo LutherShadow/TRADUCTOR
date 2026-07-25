@@ -534,6 +534,102 @@ ${styleDescription}
   }
 }
 
+// TOML Metadata Parsing & Safe Rebuilding Helpers
+export interface TomlExtractedItem {
+  startLine: number;
+  endLine: number;
+  keyName: string;
+  quoteType: '"""' | "'''" | '"' | "'";
+  value: string;
+}
+
+export function extractTomlStrings(content: string): TomlExtractedItem[] {
+  const lines = content.split(/\r?\n/);
+  const results: TomlExtractedItem[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    if (line.startsWith("displayName") || line.startsWith("description") || line.startsWith("display_name")) {
+      const eqIdx = rawLine.indexOf("=");
+      if (eqIdx === -1) continue;
+
+      const keyName = rawLine.substring(0, eqIdx).trim();
+      const valRest = rawLine.substring(eqIdx + 1).trim();
+
+      // Check for triple quote (multiline)
+      if (valRest.startsWith('"""') || valRest.startsWith("'''")) {
+        const triple = valRest.substring(0, 3) as '"""' | "'''";
+        const afterTriple = valRest.substring(3);
+
+        const closingIdx = afterTriple.indexOf(triple);
+        if (closingIdx !== -1) {
+          const valText = afterTriple.substring(0, closingIdx);
+          results.push({ startLine: i, endLine: i, keyName, quoteType: triple, value: valText });
+        } else {
+          const multilineParts: string[] = [];
+          if (afterTriple.length > 0) multilineParts.push(afterTriple);
+
+          let endLine = i;
+          for (let j = i + 1; j < lines.length; j++) {
+            const nextLineRaw = lines[j];
+            const closePos = nextLineRaw.indexOf(triple);
+            if (closePos !== -1) {
+              endLine = j;
+              const beforeClose = nextLineRaw.substring(0, closePos);
+              if (beforeClose.length > 0) multilineParts.push(beforeClose);
+              break;
+            } else {
+              multilineParts.push(nextLineRaw);
+            }
+          }
+          results.push({ startLine: i, endLine, keyName, quoteType: triple, value: multilineParts.join("\n") });
+          i = endLine;
+        }
+      }
+      // Single line quote
+      else if (valRest.startsWith('"') || valRest.startsWith("'")) {
+        const quote = valRest[0] as '"' | "'";
+        const lastQuoteIdx = valRest.lastIndexOf(quote);
+        if (lastQuoteIdx > 0 && lastQuoteIdx !== 0) {
+          const valText = valRest.substring(1, lastQuoteIdx);
+          results.push({ startLine: i, endLine: i, keyName, quoteType: quote, value: valText });
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+export function applyTomlTranslations(content: string, itemsToReplace: { item: TomlExtractedItem; newText: string }[]): string {
+  const lines = content.split(/\r?\n/);
+
+  itemsToReplace.sort((a, b) => b.item.startLine - a.item.startLine);
+
+  for (const { item, newText } of itemsToReplace) {
+    const { startLine, endLine, keyName, quoteType } = item;
+    
+    let replacementLines: string[] = [];
+    if (quoteType === '"""' || quoteType === "'''") {
+      replacementLines = [
+        `${keyName} = ${quoteType}`,
+        newText,
+        quoteType
+      ];
+    } else {
+      const escaped = newText.replace(/\\/g, "\\\\").replace(new RegExp(quoteType === '"' ? '"' : "'", "g"), "\\" + quoteType);
+      replacementLines = [`${keyName} = ${quoteType}${escaped}${quoteType}`];
+    }
+
+    const deleteCount = endLine - startLine + 1;
+    lines.splice(startLine, deleteCount, ...replacementLines);
+  }
+
+  return lines.join("\n");
+}
+
 // Main translation task executor
 export async function runTranslationTask(
   task: TranslationTask,
@@ -628,8 +724,8 @@ export async function runTranslationTask(
         }
       }
 
-      // Category 6: Mod Metadata (mods.toml, fabric.mod.json, pack.mcmeta)
-      if (entryPath === "META-INF/mods.toml" || entryPath === "fabric.mod.json" || entryPath === "pack.mcmeta") {
+      // Category 6: Mod Metadata (mods.toml, neoforge.mods.toml, fabric.mod.json, pack.mcmeta)
+      if (entryPath === "META-INF/mods.toml" || entryPath === "META-INF/neoforge.mods.toml" || entryPath === "fabric.mod.json" || entryPath === "pack.mcmeta") {
         translatableEntries.push({ entry, type: "metadata", namespace: "global" });
         continue;
       }
@@ -857,23 +953,12 @@ export async function runTranslationTask(
               textToTranslate.push({ fileIndex: i, path: entryPath, key: "pack.description", originalText: json.pack.description });
             }
           } 
-          else if (entryPath === "META-INF/mods.toml") {
-            // Read lines and look for displayName / description
-            const lines = content.split(/\r?\n/);
-            for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-              const line = lines[lineIdx].trim();
-              if (line.startsWith("displayName") || line.startsWith("description")) {
-                const eqIdx = line.indexOf("=");
-                if (eqIdx !== -1) {
-                  let val = line.substring(eqIdx + 1).trim();
-                  // Strip quotes
-                  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-                    val = val.substring(1, val.length - 1);
-                  }
-                  if (isTranslatableString(val)) {
-                    textToTranslate.push({ fileIndex: i, path: entryPath, key: `${lineIdx}::metadata`, originalText: val });
-                  }
-                }
+          else if (entryPath === "META-INF/mods.toml" || entryPath === "META-INF/neoforge.mods.toml" || entryPath.endsWith(".toml")) {
+            const tomlItems = extractTomlStrings(content);
+            for (let idx = 0; idx < tomlItems.length; idx++) {
+              const item = tomlItems[idx];
+              if (isTranslatableString(item.value)) {
+                textToTranslate.push({ fileIndex: i, path: entryPath, key: `${idx}::toml_index`, originalText: item.value });
               }
             }
           }
@@ -1302,24 +1387,21 @@ export async function runTranslationTask(
               log(`Guardado: ${entryPath}`);
             }
           } 
-          else if (entryPath === "META-INF/mods.toml") {
-            const lines = originalContent.split(/\r?\n/);
-            for (const item of items) {
-              const trans = localTranslationCache[item.originalText];
-              if (trans && trans !== item.originalText) {
-                const lineIdx = parseInt(item.key.split("::")[0]);
-                const originalLine = lines[lineIdx];
-                const eqIdx = originalLine.indexOf("=");
-                const key = originalLine.substring(0, eqIdx).trim();
-                const currentValLine = `${key} = "${trans}"`;
-                if (lines[lineIdx] !== currentValLine) {
-                  lines[lineIdx] = currentValLine;
-                  hasChanged = true;
-                }
+          else if (entryPath === "META-INF/mods.toml" || entryPath === "META-INF/neoforge.mods.toml" || entryPath.endsWith(".toml")) {
+            const tomlItems = extractTomlStrings(originalContent);
+            const itemsToReplace: { item: TomlExtractedItem; newText: string }[] = [];
+            
+            for (let idx = 0; idx < tomlItems.length; idx++) {
+              const item = tomlItems[idx];
+              const trans = localTranslationCache[item.value];
+              if (trans && trans !== item.value) {
+                itemsToReplace.push({ item, newText: trans });
               }
             }
-            if (hasChanged) {
-              addOrReplaceFile(zip, entryPath, Buffer.from(lines.join("\n"), "utf-8"));
+
+            if (itemsToReplace.length > 0) {
+              const newContent = applyTomlTranslations(originalContent, itemsToReplace);
+              addOrReplaceFile(zip, entryPath, Buffer.from(newContent, "utf-8"));
               task.stats.filesTranslated++;
               log(`Guardado: ${entryPath}`);
             }
@@ -1850,32 +1932,23 @@ export async function analyzeModFile(
               charactersToTranslate += charCount;
             }
           }
-        } else if (entryPath === "META-INF/mods.toml") {
-          const lines = content.split(/\r?\n/);
-          for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-            const line = lines[lineIdx].trim();
-            if (line.startsWith("displayName") || line.startsWith("description")) {
-              const eqIdx = line.indexOf("=");
-              if (eqIdx !== -1) {
-                let val = line.substring(eqIdx + 1).trim();
-                if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-                  val = val.substring(1, val.length - 1);
-                }
-                if (isTranslatableString(val)) {
-                  totalKeys++;
-                  const charCount = val.length;
-                  const wordCount = val.trim().split(/\s+/).filter(Boolean).length;
-                  totalCharacters += charCount;
-                  totalWords += wordCount;
+        } else if (entryPath === "META-INF/mods.toml" || entryPath === "META-INF/neoforge.mods.toml" || entryPath.endsWith(".toml")) {
+          const tomlItems = extractTomlStrings(content);
+          for (const item of tomlItems) {
+            const val = item.value;
+            if (isTranslatableString(val)) {
+              totalKeys++;
+              const charCount = val.length;
+              const wordCount = val.trim().split(/\s+/).filter(Boolean).length;
+              totalCharacters += charCount;
+              totalWords += wordCount;
 
-                  if (glossary[val] || globalTranslationMemory[val]) {
-                    translatedKeys++;
-                  } else {
-                    missingKeys++;
-                    wordsToTranslate += wordCount;
-                    charactersToTranslate += charCount;
-                  }
-                }
+              if (glossary[val] || globalTranslationMemory[val]) {
+                translatedKeys++;
+              } else {
+                missingKeys++;
+                wordsToTranslate += wordCount;
+                charactersToTranslate += charCount;
               }
             }
           }

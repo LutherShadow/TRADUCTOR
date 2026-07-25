@@ -1128,8 +1128,8 @@ export default function App() {
               }
 
               if (user && user.uid === targetUserId) {
-                setDoc(taskDocRef, cleanTask, { merge: true }).catch(err => {
-                  console.warn("[Firestore Sync Notice] Client-sync task document notice:", err?.message || err);
+                setDoc(taskDocRef, cleanTask, { merge: true }).catch(() => {
+                  // Silent fallback: translation tasks state is fully managed by backend server
                 });
               }
             }
