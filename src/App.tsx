@@ -56,6 +56,7 @@ import {
 } from "recharts";
 import { auth, googleProvider, db } from "./firebase";
 import { validateMinecraftLangJson, ValidationResult } from "./lib/langValidator";
+import { validateJarToml, TomlValidationResult } from "./utils/tomlValidator";
 
 interface Toast {
   id: string;
@@ -278,6 +279,10 @@ export default function App() {
     selected: boolean;
   }>>([]);
   const [isAnalyzingDiff, setIsAnalyzingDiff] = useState<boolean>(false);
+
+  // TOML Validation Warning state
+  const [tomlValidationIssues, setTomlValidationIssues] = useState<TomlValidationResult[] | null>(null);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[] | null>(null);
 
   const defaultOpenRouterKey = ((import.meta as any).env?.VITE_OPENROUTER_API_KEY as string) || "";
 
@@ -1346,16 +1351,8 @@ export default function App() {
     }
   };
 
-  const uploadFiles = async (filesToUpload: File[]) => {
-    if (!user) {
-      addCustomToast(
-        "Inicio de Sesión Requerido",
-        "Por favor inicia sesión con tu cuenta de Google para subir y traducir mods de Minecraft.",
-        "info"
-      );
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      return;
-    }
+  const executeUpload = async (filesToUpload: File[]) => {
+    if (!user) return;
 
     setIsUploading(true);
     setUploadError(null);
@@ -1367,7 +1364,6 @@ export default function App() {
 
     formData.append("userId", user.uid);
 
-    // Append our selection options as a JSON string
     const options = {
       translateLang,
       translateBooks,
@@ -1398,14 +1394,48 @@ export default function App() {
         throw new Error(errData.error || "Error al subir los archivos.");
       }
 
-      // Refresh immediately for the logged in user
       fetchTasks(user.uid);
     } catch (err: any) {
       setUploadError(err.message || "Error al procesar archivos.");
     } finally {
       setIsUploading(false);
+      setTomlValidationIssues(null);
+      setPendingUploadFiles(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  };
+
+  const uploadFiles = async (filesToUpload: File[]) => {
+    if (!user) {
+      addCustomToast(
+        "Inicio de Sesión Requerido",
+        "Por favor inicia sesión con tu cuenta de Google para subir y traducir mods de Minecraft.",
+        "info"
+      );
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadError(null);
+
+    // Pre-validate mods.toml syntax client-side
+    const issues: TomlValidationResult[] = [];
+    for (const file of filesToUpload) {
+      const vRes = await validateJarToml(file);
+      if (!vRes.valid) {
+        issues.push(vRes);
+      }
+    }
+
+    if (issues.length > 0) {
+      setIsUploading(false);
+      setTomlValidationIssues(issues);
+      setPendingUploadFiles(filesToUpload);
+      return;
+    }
+
+    await executeUpload(filesToUpload);
   };
 
   const runPreAnalysis = async (file: File) => {
@@ -3614,6 +3644,101 @@ export default function App() {
             </div>
           );
         })()}
+      </AnimatePresence>
+
+      {/* TOML Validation Warning Overlay Modal */}
+      <AnimatePresence>
+        {tomlValidationIssues && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-[#0d0f11] border border-amber-500/30 rounded-2xl p-6 max-w-xl w-full shadow-2xl relative"
+            >
+              <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/5">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-amber-500/10 rounded-xl border border-amber-500/20 text-amber-400">
+                    <AlertTriangle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white">Sintaxis de mods.toml Defectuosa Detectada</h3>
+                    <p className="text-xs text-slate-400">Validación previa de metadatos TOML de Minecraft</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTomlValidationIssues(null);
+                    setPendingUploadFiles(null);
+                    if (fileInputRef.current) fileInputRef.current.value = "";
+                  }}
+                  className="p-1.5 hover:bg-white/10 text-slate-400 hover:text-white rounded-lg transition-all cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-300 leading-relaxed mb-4">
+                Se han detectado posibles errores de formato o sintaxis en los metadatos TOML dentro de los siguientes mods. Si se cargan sin corregir, Minecraft Forge / NeoForge podría lanzar el error <code className="text-amber-400 bg-black/50 px-1.5 py-0.5 rounded font-mono text-[11px]">Mod candidate ... contains a corrupt or misconfigured toml</code>.
+              </p>
+
+              <div className="space-y-3 max-h-60 overflow-y-auto mb-6 pr-1 custom-scrollbar">
+                {tomlValidationIssues.map((issue, idx) => (
+                  <div key={idx} className="p-3.5 bg-red-500/10 border border-red-500/20 rounded-xl space-y-1.5">
+                    <div className="flex items-center justify-between text-xs font-bold text-white">
+                      <span className="flex items-center gap-1.5">
+                        <FileCode className="w-4 h-4 text-red-400" />
+                        {issue.fileName}
+                      </span>
+                      <span className="text-[10px] text-red-400 font-mono bg-red-500/20 px-2 py-0.5 rounded font-semibold">Sintaxis TOML no válida</span>
+                    </div>
+                    {issue.errors.map((err, eIdx) => (
+                      <p key={eIdx} className="text-[11px] text-red-300 font-mono bg-black/40 p-2 rounded leading-normal break-all">
+                        {err}
+                      </p>
+                    ))}
+                  </div>
+                ))}
+              </div>
+
+              <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl mb-6 flex items-start gap-2.5">
+                <Sparkles className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-emerald-300 leading-relaxed">
+                  <strong>Reparación automática activa:</strong> Al continuar, nuestro motor reconstruirá y reparará automáticamente las comillas y comillas triples no cerradas para garantizar que Minecraft lo cargue sin errores.
+                </p>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-end gap-2.5 pt-2 border-t border-white/5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTomlValidationIssues(null);
+                    setPendingUploadFiles(null);
+                    if (fileInputRef.current) fileInputRef.current.value = "";
+                  }}
+                  className="w-full sm:w-auto px-4 py-2 bg-white/5 hover:bg-white/10 text-slate-300 font-semibold text-xs rounded-xl border border-white/10 transition-all cursor-pointer text-center"
+                >
+                  Cancelar Subida
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (pendingUploadFiles) {
+                      const files = pendingUploadFiles;
+                      setTomlValidationIssues(null);
+                      executeUpload(files);
+                    }
+                  }}
+                  className="w-full sm:w-auto px-5 py-2 bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs rounded-xl transition-all shadow-lg shadow-emerald-500/20 cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <CheckCircle2 className="w-4 h-4 text-black" />
+                  <span>Corregir Automáticamente y Subir</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
     </div>
   );

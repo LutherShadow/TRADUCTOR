@@ -603,6 +603,9 @@ export function extractTomlStrings(content: string): TomlExtractedItem[] {
   return results;
 }
 
+import { parse as parseToml } from "smol-toml";
+import { autoRepairTomlSyntax } from "./utils/tomlValidator";
+
 export function applyTomlTranslations(content: string, itemsToReplace: { item: TomlExtractedItem; newText: string }[]): string {
   const lines = content.split(/\r?\n/);
 
@@ -627,7 +630,23 @@ export function applyTomlTranslations(content: string, itemsToReplace: { item: T
     lines.splice(startLine, deleteCount, ...replacementLines);
   }
 
-  return lines.join("\n");
+  const result = lines.join("\n");
+
+  // Validate resulting TOML syntax using smol-toml
+  try {
+    parseToml(result);
+    return result;
+  } catch (err: any) {
+    console.warn(`[TOML Auto-Fix] Sintaxis TOML modificada defectuosa (${err?.message}). Intentando reparación automática...`);
+    const repaired = autoRepairTomlSyntax(result);
+    try {
+      parseToml(repaired);
+      return repaired;
+    } catch (err2) {
+      console.error(`[TOML Safety Fallback] No se pudo reparar automáticamente el TOML. Conservando versión original intacta para evitar fallos en Minecraft.`);
+      return content;
+    }
+  }
 }
 
 // Main translation task executor
