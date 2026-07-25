@@ -6,41 +6,118 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 // Standard Minecraft term glossary for high-quality out-of-the-box translations
 export const DEFAULT_GLOSSARY: Record<string, string> = {
-  "Overworld": "Mundo Superior",
+  // Dimensions & Worlds
+  "Overworld": "Overworld",
+  "The Overworld": "El Overworld",
   "Nether": "Nether",
+  "The Nether": "El Nether",
+  "End": "End",
   "The End": "El End",
+
+  // Mod Materials & Proper Names (Never translate as literal dictionary words)
+  "Gobber": "Gobber",
+  "End Gobber": "Gobber del End",
+  "Nether Gobber": "Gobber del Nether",
+  "Overworld Gobber": "Gobber del Overworld",
+  "Aether": "Aether",
+  "Mithril": "Mithril",
+  "Tinkers": "Tinkers",
+  "Create": "Create",
+  "Botania": "Botania",
+  "Thaumcraft": "Thaumcraft",
+  "Mekanism": "Mekanism",
+
+  // Mobs, Bosses & Entities
+  "Wither": "Wither",
+  "The Wither": "El Wither",
+  "Wither Skeleton": "Esqueleto Wither",
+  "Wither Skeleton Skull": "Cabeza de esqueleto Wither",
+  "Wither Skull": "Cabeza de Wither",
+  "Ender Dragon": "Dragón del End",
+  "Ender": "Ender",
   "Enderman": "Enderman",
   "Endermen": "Endermen",
+  "Enderite": "Enderita",
   "Piglin": "Piglin",
   "Piglins": "Piglins",
+  "Piglin Brute": "Piglin bruto",
   "Creeper": "Creeper",
   "Creepers": "Creepers",
   "Zombie": "Zombi",
   "Zombies": "Zombies",
   "Skeleton": "Esqueleto",
   "Skeletons": "Esqueletos",
+  "Blaze": "Blaze",
+  "Shulker": "Shulker",
+  "Shulkers": "Shulkers",
+  "Shulker Box": "Caja de Shulker",
+
+  // Common Minecraft Items & Crafting Components
+  "End Rod": "Varilla del End",
+  "Blaze Rod": "Vara de Blaze",
+  "Rod": "Varilla",
+  "Staff": "Bastón",
+  "Wand": "Varita",
+  "Ingot": "Lingote",
+  "Nugget": "Pepita",
+  "Ore": "Mena",
+  "Raw": "Bruto",
+  "Dust": "Polvo",
+  "Shard": "Fragmento",
+  "Gem": "Gema",
+  "Crystal": "Cristal",
+  "Ender Pearl": "Perla de Ender",
+  "Eye of Ender": "Ojo de Ender",
+  "Ender Chest": "Cofre de Ender",
+  "Nether Star": "Estrella del Nether",
+  "Nether Brick": "Ladrillo del Nether",
+  "Nether Bricks": "Ladrillos del Nether",
+  "Nether Quartz": "Cuarzo del Nether",
+  "Netherite": "Inframundita",
+
+  // Equipment & Tools
+  "Pickaxe": "Pico",
+  "Axe": "Hacha",
+  "Shovel": "Pala",
+  "Hoe": "Azada",
+  "Sword": "Espada",
+  "Bow": "Arco",
+  "Crossbow": "Ballesta",
+  "Shield": "Escudo",
+  "Helmet": "Casco",
+  "Chestplate": "Peto",
+  "Leggings": "Grebas",
+  "Boots": "Botas",
+
+  // Blocks & Environment
   "Redstone": "Redstone",
   "Glowstone": "Piedra Luminosa",
+  "Bedrock": "Piedra base",
+  "Obsidian": "Obsidiana",
+  "Lapis Lazuli": "Lapislázuli",
+  "Spawner": "Generador",
+  "Elytra": "Élitros",
+  "Totem": "Tótem",
+
+  // Magic & Mechanics
   "Mana": "Maná",
   "Cooldown": "Tiempo de reutilización",
   "Spell": "Hechizo",
   "Spells": "Hechizos",
   "Spell Book": "Libro de Hechizos",
-  "Staff": "Bastón",
-  "Wand": "Varita",
   "Keybind": "Tecla",
   "Keybinding": "Asignación de tecla",
-  "Forge": "Forge",
-  "NeoForge": "NeoForge",
-  "Fabric": "Fabric",
-  "Modpack": "Modpack",
   "Creative Tab": "Pestaña de Creativo",
   "Advancement": "Progreso",
   "Advancements": "Progresos",
   "Quest": "Misión",
   "Quests": "Misiones",
   "Loot Table": "Tabla de botín",
-  "Loot Tables": "Tablas de botín"
+  "Loot Tables": "Tablas de botín",
+  "Forge": "Forge",
+  "NeoForge": "NeoForge",
+  "Fabric": "Fabric",
+  "Modpack": "Modpack"
 };
 
 // Types for Translation Request
@@ -279,6 +356,99 @@ async function translateWithAnthropic(
   return JSON.parse(cleanContent);
 }
 
+/**
+ * Advanced post-processor that enforces Minecraft naming conventions and rules:
+ * - Proper Nouns / Material Names (e.g. "Gobber" must NOT be translated as "bocón", "boco", "boca", or "engullidor").
+ * - Dimension naming rules (e.g. "End Gobber Rod" -> "Varilla de Gobber del End", "Nether Gobber" -> "Gobber del Nether", "End Rod" -> "Varilla del End").
+ * - Minecraft mob & boss names (e.g. "Wither", "Ender Dragon", "Piglin", "Shulker").
+ * - Item types ("Rod" -> "Varilla"/"Vara", "Ingot" -> "Lingote", "Nugget" -> "Pepita", "Ore" -> "Mena").
+ */
+export function postProcessMinecraftTranslation(
+  originalEn: string,
+  translatedEs: string,
+  glossary: Record<string, string>
+): string {
+  if (!translatedEs || typeof translatedEs !== "string") return translatedEs;
+
+  let result = translatedEs;
+
+  // 1. Preserve "Gobber" material name if original contains Gobber
+  if (/\bgobber\b/i.test(originalEn)) {
+    // Replace Spanish dictionary mistranslations of "Gobber" (like boco, bocón, boca, engullidor)
+    result = result.replace(/\b(bocón|boco|bocón abisal|boca)\b/gi, "Gobber");
+    
+    // Fix "Gobber final" or "Gobber de extremo" or "final Gobber" -> "Gobber del End"
+    if (/\bend\b/i.test(originalEn)) {
+      result = result.replace(/\bGobber\s+(final|del final|extremo|de extremo)\b/gi, "Gobber del End");
+      result = result.replace(/\b(final|del final|extremo|de extremo)\s+Gobber\b/gi, "Gobber del End");
+    }
+
+    // Fix "Nether Gobber" -> "Gobber del Nether"
+    if (/\bnether\b/i.test(originalEn)) {
+      result = result.replace(/\bNether\s+Gobber\b/gi, "Gobber del Nether");
+      result = result.replace(/\bGobber\s+Nether\b/gi, "Gobber del Nether");
+      result = result.replace(/\bGobber\s+abisal\b/gi, "Gobber del Nether");
+    }
+
+    // Fix "Overworld Gobber" -> "Gobber del Overworld"
+    if (/\boverworld\b/i.test(originalEn)) {
+      result = result.replace(/\bOverworld\s+Gobber\b/gi, "Gobber del Overworld");
+      result = result.replace(/\bGobber\s+Overworld\b/gi, "Gobber del Overworld");
+    }
+  }
+
+  // 2. Fix general "final" / "extremo" -> "del End" if original contains "End" as a distinct word in Minecraft item context
+  if (/\bEnd\b/i.test(originalEn) && !/\b(Ending|Ended|Ends)\b/i.test(originalEn)) {
+    result = result.replace(/\b(Varilla|Vara|Barra|Pico|Espada|Casco|Peto|Grebas|Botas|Lingote|Mena|Bloque|Anillo|Amuleto|Herramienta|Cristal|Cofre|Dragón|Barco|Piedra|Polvo|Gema|Fragmento)\s+final\b/gi, "$1 del End");
+    result = result.replace(/\b(Varilla|Vara|Barra|Pico|Espada|Casco|Peto|Grebas|Botas|Lingote|Mena|Bloque|Anillo|Amuleto|Herramienta|Cristal|Cofre|Dragón|Barco|Piedra|Polvo|Gema|Fragmento)\s+(de\s+[A-Za-zÁÉÍÓÚáéíóúñÑ]+\s+)final\b/gi, "$1 $2del End");
+    result = result.replace(/\bdel\s+final\b/gi, "del End");
+    result = result.replace(/\bde\s+extremo\b/gi, "del End");
+  }
+
+  // 3. Fix "Nether" mistranslations as "abisal" or "infierno" in Minecraft context
+  if (/\bNether\b/i.test(originalEn)) {
+    result = result.replace(/\b(de\s+la\s+|del\s+)?(inframundo|infierno)\b/gi, "del Nether");
+    result = result.replace(/\babisal\b/gi, "del Nether");
+    result = result.replace(/\bNether\s+Nether\b/gi, "Nether");
+  }
+
+  // 4. Fix Wither / Ender mob names if mistranslated
+  if (/\bWither\b/i.test(originalEn)) {
+    result = result.replace(/\b(El\s+)?Marchitador\b/gi, "Wither");
+    result = result.replace(/\bmarchitador\b/gi, "Wither");
+  }
+
+  // 5. Apply glossary entries sorted by key length descending
+  const sortedGlossary = Object.entries(glossary || {}).sort((a, b) => b[0].length - a[0].length);
+  for (const [enTerm, esTerm] of sortedGlossary) {
+    if (!enTerm) continue;
+    const origRegex = new RegExp(`\\b${enTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
+    if (origRegex.test(originalEn)) {
+      const targetRegex = new RegExp(`\\b${enTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "gi");
+      if (targetRegex.test(result)) {
+        result = result.replace(targetRegex, esTerm);
+      }
+    }
+  }
+
+  return result;
+}
+
+function finalizeTranslations(
+  batch: Record<string, string>,
+  rawDict: Record<string, string>,
+  glossary: Record<string, string>
+): Record<string, string> {
+  const finalDict: Record<string, string> = {};
+  for (const key of Object.keys(batch)) {
+    const orig = batch[key] || "";
+    const rawVal = rawDict[key] !== undefined ? rawDict[key] : orig;
+    const cleaned = cleanTranslationPunctuation(rawVal);
+    finalDict[key] = postProcessMinecraftTranslation(orig, cleaned, glossary);
+  }
+  return finalDict;
+}
+
 // Translates a batch of strings using the configured API Engine
 async function translateBatch(
   batch: Record<string, string>,
@@ -303,8 +473,29 @@ async function translateBatch(
     ? "5. Translation Style: Provide a more LITERAL translation. Stay as close as possible to the original English wording, word order, and phrasing, ensuring it remains grammatically correct in Spanish."
     : "5. Translation Style: Provide a more NATURAL and IDIOMATIC translation. Focus on localizing the phrasing, idioms, and expression flow so it sounds like an organic, professional game localization, rather than a word-for-word translation.";
 
-  const systemInstruction = `You are a professional Minecraft Mod Translator specializing in Spanish translations.
+  const systemInstruction = `You are a master Minecraft Mod Translator specializing in authentic Spanish game localization.
 Your task is to translate values from English to ${targetLangName}.
+
+MINECRAFT LOCALIZATION & PROPER NOUN LOGIC:
+- Material Names & Proper Nouns: NEVER translate mod material names or brand names into dictionary words. (e.g. "Gobber" is a custom mod material and MUST remain "Gobber"; never translate it to "bocón", "boco", "boca", or "engullidor").
+- Dimensions: Keep "End", "Nether", and "Overworld" as standard Minecraft dimension terms in item/mob names:
+  * "End Gobber Rod" -> "Varilla de Gobber del End" (or "Vara de Gobber del End")
+  * "Gobber Rod" -> "Varilla de Gobber" (or "Vara de Gobber")
+  * "Nether Gobber" -> "Gobber del Nether"
+  * "Overworld Gobber" -> "Gobber del Overworld"
+- Iconic Mobs & Bosses: Keep "Wither", "Ender Dragon", "Enderman", "Piglin", "Shulker", "Creeper", "Blaze" in recognized forms:
+  * "Wither Skeleton Skull" -> "Cabeza de esqueleto Wither"
+  * "Wither Skull" -> "Cabeza de Wither"
+  * "Ender Chest" -> "Cofre de Ender"
+  * "Ender Pearl" -> "Perla de Ender"
+  * "End Rod" -> "Varilla del End"
+- Standard Crafting Terms:
+  * "Rod" -> "Varilla" / "Vara"
+  * "Ingot" -> "Lingote"
+  * "Nugget" -> "Pepita"
+  * "Ore" -> "Mena"
+  * "Raw" -> "Bruto"
+  * Equipment: "Pico", "Hacha", "Pala", "Azada", "Espada", "Casco", "Peto", "Grebas", "Botas"
 
 STRICT RULES:
 1. Preserve all variables, placeholders, formatting tags, and color codes EXACTLY in their correct positions. Examples:
@@ -316,13 +507,13 @@ STRICT RULES:
 2. Maintain namespaces and internal paths exactly as-is. Do NOT translate words prefixed with "minecraft:", "forge:", "neoforge:", "fabric:", or matching "modid:".
 3. Apply this custom glossary strictly for term consistency:
 ${glossaryText}
-4. Translate only the human-readable text visible to players. Keep the tone natural, engaging, and faithful to standard Minecraft terminology (e.g. use "Mesa de trabajo" for Crafting Table, "Mundo Superior" for Overworld, etc.).
+4. Translate only human-readable text visible to players. Keep the tone natural, engaging, and faithful to standard Minecraft Spanish community conventions.
 ${styleDescription}
 6. You MUST return a JSON object with the exact same keys as the input. Do NOT omit any keys or alter their names. Output ONLY the valid JSON object.`;
 
   try {
     if (engine === "google_free" || options.apiEngine === "google_free") {
-      const finalResult: Record<string, string> = {};
+      const rawResult: Record<string, string> = {};
       const targetCode = targetLangName.toLowerCase().includes("mx") ? "es" : "es";
       
       // Process in small controlled sequential slices of 5 keys to prevent rate limits
@@ -334,22 +525,15 @@ ${styleDescription}
             const originalText = batch[key];
             try {
               let translated = await translateFreeGoogle(originalText, targetCode);
-              translated = cleanTranslationPunctuation(translated);
-              
-              // Post-apply glossary to enforce key words in free translate
-              for (const [enTerm, esTerm] of Object.entries(glossary)) {
-                const regex = new RegExp(`\\b${enTerm}\\b`, "gi");
-                translated = translated.replace(regex, esTerm);
-              }
-              finalResult[key] = translated;
+              rawResult[key] = translated;
             } catch (e: any) {
               logFn(`Advertencia: Falló Google gratis para "${originalText}". Usando original.`);
-              finalResult[key] = originalText;
+              rawResult[key] = originalText;
             }
           })
         );
       }
-      return finalResult;
+      return finalizeTranslations(batch, rawResult, glossary);
     }
 
     if (engine === "google_cloud") {
@@ -382,19 +566,17 @@ ${styleDescription}
         throw new Error("La respuesta de Google Cloud está incompleta.");
       }
       
-      const finalResult: Record<string, string> = {};
+      const rawResult: Record<string, string> = {};
       keys.forEach((key, idx) => {
-        let translated = translations[idx].translatedText;
-        translated = cleanTranslationPunctuation(translated);
-        finalResult[key] = translated;
+        rawResult[key] = translations[idx].translatedText;
       });
-      return finalResult;
+      return finalizeTranslations(batch, rawResult, glossary);
     }
 
     if (engine === "openai") {
       const apiKey = customKeys.openai;
       if (!apiKey) throw new Error("Clave API de OpenAI no configurada.");
-      return await translateWithOpenAICompatible(
+      const res = await translateWithOpenAICompatible(
         "https://api.openai.com/v1/chat/completions",
         "gpt-4o-mini",
         apiKey,
@@ -402,12 +584,13 @@ ${styleDescription}
         batch,
         true
       );
+      return finalizeTranslations(batch, res, glossary);
     }
 
     if (engine === "deepseek") {
       const apiKey = customKeys.deepseek;
       if (!apiKey) throw new Error("Clave API de DeepSeek no configurada.");
-      return await translateWithOpenAICompatible(
+      const res = await translateWithOpenAICompatible(
         "https://api.deepseek.com/chat/completions",
         "deepseek-chat",
         apiKey,
@@ -415,12 +598,13 @@ ${styleDescription}
         batch,
         true
       );
+      return finalizeTranslations(batch, res, glossary);
     }
 
     if (engine === "groq") {
       const apiKey = customKeys.groq;
       if (!apiKey) throw new Error("Clave API de Groq no configurada.");
-      return await translateWithOpenAICompatible(
+      const res = await translateWithOpenAICompatible(
         "https://api.groq.com/openapi/v1/chat/completions",
         "llama-3.1-8b-instant",
         apiKey,
@@ -428,13 +612,14 @@ ${styleDescription}
         batch,
         true
       );
+      return finalizeTranslations(batch, res, glossary);
     }
 
     if (engine === "openrouter") {
       const apiKey = customKeys.openrouter;
       if (!apiKey) throw new Error("Clave API de OpenRouter no configurada.");
       const openModel = options.openrouterModel || "google/gemini-2.5-flash";
-      return await translateWithOpenAICompatible(
+      const res = await translateWithOpenAICompatible(
         "https://openrouter.ai/api/v1/chat/completions",
         openModel,
         apiKey,
@@ -443,12 +628,14 @@ ${styleDescription}
         false,
         { "HTTP-Referer": "https://ai.studio/build" }
       );
+      return finalizeTranslations(batch, res, glossary);
     }
 
     if (engine === "anthropic") {
       const apiKey = customKeys.anthropic;
       if (!apiKey) throw new Error("Clave API de Anthropic Claude no configurada.");
-      return await translateWithAnthropic(apiKey, systemInstruction, batch);
+      const res = await translateWithAnthropic(apiKey, systemInstruction, batch);
+      return finalizeTranslations(batch, res, glossary);
     }
 
     // Default to Gemini API
@@ -494,16 +681,7 @@ ${styleDescription}
     }
 
     const result = JSON.parse(text) as Record<string, string>;
-    
-    const finalResult: Record<string, string> = {};
-    for (const key of keys) {
-      if (result[key] !== undefined) {
-        finalResult[key] = cleanTranslationPunctuation(result[key]);
-      } else {
-        finalResult[key] = batch[key];
-      }
-    }
-    return finalResult;
+    return finalizeTranslations(batch, result, glossary);
   } catch (error: any) {
     const errorStr = error?.message || String(error);
     const isTokenOrQuota = errorStr.includes("402") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("RESOURCE_EXHAUSTED") || errorStr.includes("credits") || errorStr.includes("tokens");
