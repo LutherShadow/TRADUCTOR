@@ -151,14 +151,11 @@ const OPENROUTER_DEFAULT_MODELS = [
   { id: "mistralai/mistral-small-24b-instruct-2501", name: "mistralai/mistral-small-24b-instruct-2501 (Mistral Small)", isFree: false }
 ];
 
-const API_BASE = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || window.location.hostname.endsWith(".run.app"))
-  ? ""
-  : "https://ais-pre-6fjyrq6hehrxtccdi2555v-312633509664.us-east1.run.app";
+const API_BASE = "";
 
 const apiFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   let urlString = typeof input === "string" ? input : (input as any).toString();
   
-  // Intercept relative cookie-checks and route them to the active API base
   if (urlString.includes("__cookie_check.html") && !urlString.startsWith("http")) {
     urlString = `${API_BASE}${urlString}`;
   }
@@ -172,8 +169,6 @@ const apiFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<R
     };
 
     if (isCrossSite) {
-      // In cross-origin mode, we must set manual redirects to detect the auth challenge 302
-      // and trigger our cookie authorization UI rather than letting the browser block it.
       fetchOptions.redirect = "manual";
     }
 
@@ -189,7 +184,6 @@ const apiFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<R
     return res;
   } catch (error: any) {
     if (isCrossSite) {
-      // If a request fails due to a CORS redirect failure, trigger the cookie authorization flow
       if (error instanceof TypeError && (error.message.includes("Failed to fetch") || error.message.includes("NetworkError"))) {
         if (typeof window !== "undefined" && (window as any).setCookieAuthRequired) {
           (window as any).setCookieAuthRequired(true);

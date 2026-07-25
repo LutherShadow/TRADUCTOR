@@ -88,6 +88,22 @@ export const DEFAULT_GLOSSARY: Record<string, string> = {
   "Chestplate": "Peto",
   "Leggings": "Grebas",
   "Boots": "Botas",
+  "Pike": "Pica",
+  "Pikes": "Picas",
+  "Spear": "Lanza",
+  "Spears": "Lanzas",
+  "Scythe": "Guadaña",
+  "Scythes": "Guadañas",
+  "Dagger": "Daga",
+  "Daggers": "Dagas",
+  "Mace": "Maza",
+  "Maces": "Mazas",
+  "Hammer": "Martillo",
+  "Hammers": "Martillos",
+  "Bleeding": "Sangrado",
+  "Bleeding Effect": "Efecto de sangrado",
+  "Bleeding Sound": "Sonido de sangrado",
+  "Electric": "Eléctrico",
 
   // Blocks & Environment
   "Redstone": "Redstone",
@@ -194,6 +210,97 @@ export function isTranslatableString(str: string): boolean {
   if (trimmed.includes(".") && trimmed.split(".").every(part => /^[a-zA-Z0-9_]+$/.test(part)) && trimmed.length > 15) return false;
 
   return true;
+}
+
+// Helper to convert raw snake_case item/sound/effect keys into human readable Title Case
+export function formatSnakeCaseIfNeeded(val: string): string {
+  if (!val || typeof val !== "string") return val;
+  const trimmed = val.trim();
+  // Match pure snake_case identifiers like "diamond_pike", "bleeding_sound", "emerald_pike"
+  if (/^[a-z0-9]+(_[a-z0-9]+)+$/i.test(trimmed)) {
+    return trimmed
+      .split("_")
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(" ");
+  }
+  // Single lower_case word if it's purely letters and not a reserved keyword
+  if (/^[a-z]{3,}$/.test(trimmed) && !["true", "false", "null", "none", "default"].includes(trimmed)) {
+    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  }
+  return trimmed;
+}
+
+// Helper to determine if a string is untranslated English text in a language file
+export function isLikelyEnglish(str: string): boolean {
+  if (!str || typeof str !== "string") return false;
+  const trimmed = str.trim();
+  if (!trimmed) return false;
+
+  // Check for common English stopwords
+  if (/\b(the|of|and|in|on|with|for|to|a|an|from|by|at|is|are|this|that|these|those|of the|of a)\b/i.test(trimmed)) {
+    return true;
+  }
+  
+  // Check for specific untranslated English words in Minecraft item descriptions / names
+  if (/\b(Pike|Pikes|Wrath|Sanctifier|Whisper|Flare|Schulk|Bleeding|Sound|Boots|Fork|Lamentations|Gale|Piercer|Scorchfang|World|Ultimate|Sword|Shield|Axe|Pickaxe|Armor|Effect|Description)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // If it's formatted as snake_case
+  if (/^[a-z0-9]+(_[a-z0-9]+)+$/i.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}
+
+export interface IndexedZipEntry {
+  entryName: string;
+  entryNameLower: string;
+  entry: any;
+}
+
+export class FastZipIndex {
+  private entries: IndexedZipEntry[] = [];
+  private entryMap: Map<string, any> = new Map();
+  private langMap: Map<string, IndexedZipEntry[]> = new Map(); // namespace -> lang entries
+
+  constructor(zipEntries: any[]) {
+    for (const entry of zipEntries) {
+      if (entry.isDirectory || entry.entryName.endsWith(".class")) continue;
+      const entryName = entry.entryName;
+      const entryNameLower = entryName.toLowerCase();
+      const indexed: IndexedZipEntry = {
+        entryName,
+        entryNameLower,
+        entry
+      };
+      this.entries.push(indexed);
+      this.entryMap.set(entryName, entry);
+      this.entryMap.set(entryNameLower, entry);
+
+      const assetsMatch = entryNameLower.match(/^assets\/([a-z0-9_-]+)\/lang\/(.+)$/);
+      if (assetsMatch) {
+        const ns = assetsMatch[1];
+        if (!this.langMap.has(ns)) {
+          this.langMap.set(ns, []);
+        }
+        this.langMap.get(ns)!.push(indexed);
+      }
+    }
+  }
+
+  getEntry(pathStr: string): any {
+    return this.entryMap.get(pathStr) || this.entryMap.get(pathStr.toLowerCase()) || null;
+  }
+
+  getLangEntriesForNamespace(namespace: string): IndexedZipEntry[] {
+    return this.langMap.get(namespace.toLowerCase()) || [];
+  }
+
+  getAllIndexedEntries(): IndexedZipEntry[] {
+    return this.entries;
+  }
 }
 
 // Safe utility to overwrite an entry in AdmZip without causing duplicates
@@ -416,6 +523,14 @@ export function postProcessMinecraftTranslation(
   if (/\bWither\b/i.test(originalEn)) {
     result = result.replace(/\b(El\s+)?Marchitador\b/gi, "Wither");
     result = result.replace(/\bmarchitador\b/gi, "Wither");
+  }
+
+  // 5. Fix weapon Pikes if mistranslated as fish ("Lucio" -> "Pica")
+  if (/\bpike(s)?\b/i.test(originalEn)) {
+    result = result.replace(/\bLucio\s+de\s+(diamante|esmeralda|oro|hierro|piedra|netherita|inframundita)\b/gi, "Pica de $1");
+    result = result.replace(/\bLucio\s+dorado\b/gi, "Pica dorada");
+    result = result.replace(/\bLucio\b/gi, "Pica");
+    result = result.replace(/\bLucios\b/gi, "Picas");
   }
 
   // 5. Apply glossary entries sorted by key length descending
@@ -909,34 +1024,31 @@ export async function runTranslationTask(
   try {
     // 1. Load ZIP
     const zip = new AdmZip(originalFilePath);
-    const entries = zip.getEntries();
-    task.totalFiles = entries.length;
-    log(`Se han encontrado ${entries.length} archivos dentro del mod.`);
+    const rawEntries = zip.getEntries();
+    const fastIndex = new FastZipIndex(rawEntries);
+    const entries = fastIndex.getAllIndexedEntries();
+    task.totalFiles = rawEntries.length;
+    log(`Se han encontrado ${rawEntries.length} archivos dentro del mod.`);
 
     // 2. Identify and categorise files
     const translatableEntries: { entry: any; type: string; namespace: string }[] = [];
     
-    for (const entry of entries) {
-      const entryPath = entry.entryName;
+    for (const indexed of entries) {
+      const entry = indexed.entry;
+      const entryPath = indexed.entryName;
       
-      // Skip directories or compilation artifacts
-      if (entry.isDirectory || entryPath.endsWith(".class")) continue;
-
       // Extract namespace if possible (e.g. assets/<namespace>/...)
       const assetsMatch = entryPath.match(/^assets\/([a-zA-Z0-9_-]+)\/(.+)$/);
       const dataMatch = entryPath.match(/^data\/([a-zA-Z0-9_-]+)\/(.+)$/);
       
-      // Category 1: Lang files
+      // Category 1: Lang files (Include ALL .json or .lang files in assets/<namespace>/lang/)
       if (options.translateLang || options.translateAll) {
-        if (assetsMatch && assetsMatch[2].startsWith("lang/") && assetsMatch[2].endsWith(".json")) {
-          // English (or general template) file
-          if (assetsMatch[2] === "lang/en_us.json" || assetsMatch[2].includes("en_")) {
+        if (assetsMatch && assetsMatch[2].startsWith("lang/")) {
+          if (assetsMatch[2].endsWith(".json")) {
             translatableEntries.push({ entry, type: "lang_json", namespace: assetsMatch[1] });
             continue;
           }
-        }
-        if (assetsMatch && assetsMatch[2].startsWith("lang/") && assetsMatch[2].endsWith(".lang")) {
-          if (assetsMatch[2] === "lang/en_us.lang" || assetsMatch[2].includes("en_")) {
+          if (assetsMatch[2].endsWith(".lang")) {
             translatableEntries.push({ entry, type: "lang_legacy", namespace: assetsMatch[1] });
             continue;
           }
@@ -1020,71 +1132,48 @@ export async function runTranslationTask(
           let existingEsEs: Record<string, string> = {};
           let existingEsMx: Record<string, string> = {};
           
-          // Search for customized language file variants (like es__es.json, es-es.json, etc.)
           const esEsPathsFound = new Set<string>([esEsPath]);
           const esMxPathsFound = new Set<string>([esMxPath]);
           
-          try {
-            const allEntries = zip.getEntries();
-            const langDir = `assets/${namespace}/lang/`.toLowerCase();
-            for (const entry of allEntries) {
-              if (entry.isDirectory) continue;
-              const entryPathLower = entry.entryName.toLowerCase();
-              if (entryPathLower.startsWith(langDir)) {
-                const base = path.basename(entryPathLower);
-                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.json") {
-                  esEsPathsFound.add(entry.entryName);
-                }
-                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
-                  esMxPathsFound.add(entry.entryName);
-                }
-              }
-            }
-          } catch (e) {}
-
-          for (const pathFound of esEsPathsFound) {
+          const langEntries = fastIndex.getLangEntriesForNamespace(namespace);
+          for (const langEnt of langEntries) {
+            const baseName = path.basename(langEnt.entryNameLower);
             try {
-              const esEsEntry = zip.getEntry(pathFound);
-              if (esEsEntry) {
-                const parsed = JSON.parse(esEsEntry.getData().toString("utf-8"));
+              const parsed = JSON.parse(langEnt.entry.getData().toString("utf-8"));
+              if (baseName.includes("es__es") || baseName.includes("es-es") || baseName.includes("es_es") || baseName === "es.json") {
+                esEsPathsFound.add(langEnt.entryName);
                 existingEsEs = { ...existingEsEs, ...parsed };
               }
-            } catch (e) {}
-          }
-          
-          for (const pathFound of esMxPathsFound) {
-            try {
-              const esMxEntry = zip.getEntry(pathFound);
-              if (esMxEntry) {
-                const parsed = JSON.parse(esMxEntry.getData().toString("utf-8"));
+              if (baseName.includes("es__mx") || baseName.includes("es-mx") || baseName.includes("es_mx")) {
+                esMxPathsFound.add(langEnt.entryName);
                 existingEsMx = { ...existingEsMx, ...parsed };
               }
             } catch (e) {}
           }
           
           for (const key of Object.keys(json)) {
-            const val = json[key];
-            if (typeof val === "string") {
+            const rawVal = json[key];
+            if (typeof rawVal === "string") {
+              const formattedVal = formatSnakeCaseIfNeeded(rawVal);
               let needsTranslateForEsEs = false;
               let needsTranslateForEsMx = false;
               
               if (options.targetLocale === "es_es" || options.targetLocale === "both") {
                 const existingVal = existingEsEs[key];
-                // If it does not exist, or matches the English value (and is translatable), we need to translate it
-                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                if (!existingVal || (existingVal === rawVal && isTranslatableString(rawVal)) || isLikelyEnglish(existingVal)) {
                   needsTranslateForEsEs = true;
                 }
               }
               
               if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
                 const existingVal = existingEsMx[key];
-                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                if (!existingVal || (existingVal === rawVal && isTranslatableString(rawVal)) || isLikelyEnglish(existingVal)) {
                   needsTranslateForEsMx = true;
                 }
               }
               
-              if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(val)) {
-                textToTranslate.push({ fileIndex: i, path: entryPath, key, originalText: val });
+              if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(formattedVal)) {
+                textToTranslate.push({ fileIndex: i, path: entryPath, key, originalText: formattedVal });
               }
             }
           }
@@ -1093,7 +1182,6 @@ export async function runTranslationTask(
           // Flat key=value properties file
           const lines = content.split(/\r?\n/);
           
-          // Check for existing target legacy flat files
           const esEsPath = `assets/${namespace}/lang/es_es.lang`;
           const esMxPath = `assets/${namespace}/lang/es_mx.lang`;
           
@@ -1114,43 +1202,21 @@ export async function runTranslationTask(
             return map;
           };
 
-          // Search for customized legacy language file variants (like es__es.lang, es-es.lang, etc.)
           const esEsLangPathsFound = new Set<string>([esEsPath]);
           const esMxLangPathsFound = new Set<string>([esMxPath]);
           
-          try {
-            const allEntries = zip.getEntries();
-            const langDir = `assets/${namespace}/lang/`.toLowerCase();
-            for (const entry of allEntries) {
-              if (entry.isDirectory) continue;
-              const entryPathLower = entry.entryName.toLowerCase();
-              if (entryPathLower.startsWith(langDir)) {
-                const base = path.basename(entryPathLower);
-                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.lang") {
-                  esEsLangPathsFound.add(entry.entryName);
-                }
-                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
-                  esMxLangPathsFound.add(entry.entryName);
-                }
-              }
-            }
-          } catch (e) {}
-
-          for (const pathFound of esEsLangPathsFound) {
+          const langEntries = fastIndex.getLangEntriesForNamespace(namespace);
+          for (const langEnt of langEntries) {
+            const baseName = path.basename(langEnt.entryNameLower);
             try {
-              const entry = zip.getEntry(pathFound);
-              if (entry) {
-                const parsed = parseLegacyLang(entry.getData().toString("utf-8"));
+              if (baseName.includes("es__es") || baseName.includes("es-es") || baseName.includes("es_es") || baseName === "es.lang") {
+                esEsLangPathsFound.add(langEnt.entryName);
+                const parsed = parseLegacyLang(langEnt.entry.getData().toString("utf-8"));
                 existingEsEsMap = { ...existingEsEsMap, ...parsed };
               }
-            } catch (e) {}
-          }
-          
-          for (const pathFound of esMxLangPathsFound) {
-            try {
-              const entry = zip.getEntry(pathFound);
-              if (entry) {
-                const parsed = parseLegacyLang(entry.getData().toString("utf-8"));
+              if (baseName.includes("es__mx") || baseName.includes("es-mx") || baseName.includes("es_mx")) {
+                esMxLangPathsFound.add(langEnt.entryName);
+                const parsed = parseLegacyLang(langEnt.entry.getData().toString("utf-8"));
                 existingEsMxMap = { ...existingEsMxMap, ...parsed };
               }
             } catch (e) {}
@@ -1162,28 +1228,29 @@ export async function runTranslationTask(
             
             const eqIdx = line.indexOf("=");
             const key = line.substring(0, eqIdx).trim();
-            const val = line.substring(eqIdx + 1).trim();
+            const rawVal = line.substring(eqIdx + 1).trim();
+            const formattedVal = formatSnakeCaseIfNeeded(rawVal);
             
-            if (isTranslatableString(val)) {
+            if (isTranslatableString(formattedVal)) {
               let needsTranslateForEsEs = false;
               let needsTranslateForEsMx = false;
               
               if (options.targetLocale === "es_es" || options.targetLocale === "both") {
                 const existingVal = existingEsEsMap[key];
-                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                if (!existingVal || (existingVal === rawVal && isTranslatableString(rawVal)) || isLikelyEnglish(existingVal)) {
                   needsTranslateForEsEs = true;
                 }
               }
               
               if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
                 const existingVal = existingEsMxMap[key];
-                if (!existingVal || (existingVal === val && isTranslatableString(val))) {
+                if (!existingVal || (existingVal === rawVal && isTranslatableString(rawVal)) || isLikelyEnglish(existingVal)) {
                   needsTranslateForEsMx = true;
                 }
               }
               
-              if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(val)) {
-                textToTranslate.push({ fileIndex: i, path: entryPath, key: `${lineIdx}::${key}`, originalText: val });
+              if ((needsTranslateForEsEs || needsTranslateForEsMx) && isTranslatableString(formattedVal)) {
+                textToTranslate.push({ fileIndex: i, path: entryPath, key: `${lineIdx}::${key}`, originalText: formattedVal });
               }
             }
           }
@@ -1215,8 +1282,7 @@ export async function runTranslationTask(
           }
         } 
         else {
-          // General JSON files (advancements, patchouli books, loot tables, etc.)
-          // We recursively search for translatable strings in specific keys
+          // General JSON files (advancements, patchouli books, loot tables, recipes, JEI, dialogs, etc.)
           const json = JSON.parse(content);
           
           const scanJsonNode = (node: any, jsonPath: string) => {
@@ -1224,12 +1290,17 @@ export async function runTranslationTask(
             
             if (typeof node === "string") {
               const lastKey = jsonPath.split(".").pop() || "";
-              // Be smart: translate if it's a known translatable key, or if it has generic translatable properties
-              const translatableKeys = ["name", "text", "description", "title", "subtitle", "lore", "pages", "message", "tooltip", "header"];
+              const translatableKeys = [
+                "name", "text", "description", "title", "subtitle", "lore", "pages", "message",
+                "tooltip", "header", "info", "information", "details", "comment", "label", "effect",
+                "subtitles", "summary", "prompt", "dialog", "pikes", "weapon", "ability", "guide",
+                "entry", "content", "body", "bio", "flavor", "desc", "jei", "sound"
+              ];
               
               const isTargetKey = translatableKeys.some(tk => lastKey.toLowerCase().includes(tk));
-              if (isTargetKey && isTranslatableString(node)) {
-                textToTranslate.push({ fileIndex: i, path: entryPath, key: jsonPath, originalText: node });
+              const formattedNode = formatSnakeCaseIfNeeded(node);
+              if ((isTargetKey || (formattedNode.includes(" ") && isTranslatableString(formattedNode))) && isTranslatableString(formattedNode)) {
+                textToTranslate.push({ fileIndex: i, path: entryPath, key: jsonPath, originalText: formattedNode });
               }
               return;
             }
@@ -1374,43 +1445,20 @@ export async function runTranslationTask(
           let existingEsEs: Record<string, string> = {};
           let existingEsMx: Record<string, string> = {};
           
-          // Search for customized language file variants (like es__es.json, es-es.json, etc.)
           const esEsPathsFound = new Set<string>([esEsPath]);
           const esMxPathsFound = new Set<string>([esMxPath]);
           
-          try {
-            const allEntries = zip.getEntries();
-            const langDir = `assets/${namespace}/lang/`.toLowerCase();
-            for (const entry of allEntries) {
-              if (entry.isDirectory) continue;
-              const entryPathLower = entry.entryName.toLowerCase();
-              if (entryPathLower.startsWith(langDir)) {
-                const base = path.basename(entryPathLower);
-                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.json") {
-                  esEsPathsFound.add(entry.entryName);
-                }
-                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
-                  esMxPathsFound.add(entry.entryName);
-                }
-              }
-            }
-          } catch (e) {}
-
-          for (const pathFound of esEsPathsFound) {
+          const langEntries = fastIndex.getLangEntriesForNamespace(namespace);
+          for (const langEnt of langEntries) {
+            const baseName = path.basename(langEnt.entryNameLower);
             try {
-              const esEsEntry = zip.getEntry(pathFound);
-              if (esEsEntry) {
-                const parsed = JSON.parse(esEsEntry.getData().toString("utf-8"));
+              const parsed = JSON.parse(langEnt.entry.getData().toString("utf-8"));
+              if (baseName.includes("es__es") || baseName.includes("es-es") || baseName.includes("es_es") || baseName === "es.json") {
+                esEsPathsFound.add(langEnt.entryName);
                 existingEsEs = { ...existingEsEs, ...parsed };
               }
-            } catch (e) {}
-          }
-          
-          for (const pathFound of esMxPathsFound) {
-            try {
-              const esMxEntry = zip.getEntry(pathFound);
-              if (esMxEntry) {
-                const parsed = JSON.parse(esMxEntry.getData().toString("utf-8"));
+              if (baseName.includes("es__mx") || baseName.includes("es-mx") || baseName.includes("es_mx")) {
+                esMxPathsFound.add(langEnt.entryName);
                 existingEsMx = { ...existingEsMx, ...parsed };
               }
             } catch (e) {}
@@ -1422,15 +1470,17 @@ export async function runTranslationTask(
           let esEsChanged = false;
           let esMxChanged = false;
           
-          // For every key in the English json, merge translation
+          // For every key in the json, merge translation
           for (const key of Object.keys(json)) {
-            const englishVal = json[key];
-            const translated = localTranslationCache[englishVal];
+            const rawVal = json[key];
+            if (typeof rawVal !== "string") continue;
+            const formattedVal = formatSnakeCaseIfNeeded(rawVal);
+            const translated = localTranslationCache[formattedVal] || localTranslationCache[rawVal];
             
             if (options.targetLocale === "es_es" || options.targetLocale === "both") {
               const currentEsEs = finalEsEs[key];
-              if (!currentEsEs || (currentEsEs === englishVal && isTranslatableString(englishVal))) {
-                const newVal = translated || englishVal;
+              if (!currentEsEs || (currentEsEs === rawVal && isTranslatableString(rawVal)) || isLikelyEnglish(currentEsEs)) {
+                const newVal = translated || formattedVal || rawVal;
                 if (currentEsEs !== newVal) {
                   finalEsEs[key] = newVal;
                   esEsChanged = true;
@@ -1440,8 +1490,8 @@ export async function runTranslationTask(
             
             if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
               const currentEsMx = finalEsMx[key];
-              if (!currentEsMx || (currentEsMx === englishVal && isTranslatableString(englishVal))) {
-                const newVal = translated || englishVal;
+              if (!currentEsMx || (currentEsMx === rawVal && isTranslatableString(rawVal)) || isLikelyEnglish(currentEsMx)) {
+                const newVal = translated || formattedVal || rawVal;
                 if (currentEsMx !== newVal) {
                   finalEsMx[key] = newVal;
                   esMxChanged = true;
@@ -1450,10 +1500,9 @@ export async function runTranslationTask(
             }
           }
           
-          // If we had existing files and didn't change anything, we don't write them. But if they didn't exist, we must write them.
           if (options.targetLocale === "es_es" || options.targetLocale === "both") {
             for (const pathFound of esEsPathsFound) {
-              const exists = zip.getEntry(pathFound) !== null;
+              const exists = fastIndex.getEntry(pathFound) !== null;
               if (!exists || esEsChanged) {
                 const finalJsonStr = JSON.stringify(finalEsEs, null, 2);
                 addOrReplaceFile(zip, pathFound, Buffer.from(finalJsonStr, "utf-8"));
@@ -1465,7 +1514,7 @@ export async function runTranslationTask(
           
           if (options.targetLocale === "es_mx" || options.targetLocale === "both") {
             for (const pathFound of esMxPathsFound) {
-              const exists = zip.getEntry(pathFound) !== null;
+              const exists = fastIndex.getEntry(pathFound) !== null;
               if (!exists || esMxChanged) {
                 const finalJsonStr = JSON.stringify(finalEsMx, null, 2);
                 addOrReplaceFile(zip, pathFound, Buffer.from(finalJsonStr, "utf-8"));
@@ -1473,6 +1522,29 @@ export async function runTranslationTask(
                 task.stats.filesTranslated++;
               }
             }
+          }
+
+          // If entryPath is a custom lang file (e.g., indomita_furia.json), write translated keys directly into it as well
+          if (entryPath && !esEsPathsFound.has(entryPath) && !esMxPathsFound.has(entryPath)) {
+            try {
+              const customObj = JSON.parse(originalContent);
+              let customChanged = false;
+              for (const key of Object.keys(customObj)) {
+                const origVal = customObj[key];
+                if (typeof origVal !== "string") continue;
+                const formattedOrig = formatSnakeCaseIfNeeded(origVal);
+                const translated = localTranslationCache[formattedOrig] || localTranslationCache[origVal];
+                if (translated && customObj[key] !== translated) {
+                  customObj[key] = translated;
+                  customChanged = true;
+                }
+              }
+              if (customChanged) {
+                addOrReplaceFile(zip, entryPath, Buffer.from(JSON.stringify(customObj, null, 2), "utf-8"));
+                log(`Guardado (archivo de idioma personalizado): ${entryPath}`);
+                task.stats.filesTranslated++;
+              }
+            } catch (e) {}
           }
           continue;
         } 
@@ -1501,27 +1573,25 @@ export async function runTranslationTask(
             return map;
           };
 
-          // Search for customized legacy language file variants (like es__es.lang, es-es.lang, etc.)
           const esEsLangPathsFound = new Set<string>([esEsPath]);
           const esMxLangPathsFound = new Set<string>([esMxPath]);
           
-          try {
-            const allEntries = zip.getEntries();
-            const langDir = `assets/${namespace}/lang/`.toLowerCase();
-            for (const entry of allEntries) {
-              if (entry.isDirectory) continue;
-              const entryPathLower = entry.entryName.toLowerCase();
-              if (entryPathLower.startsWith(langDir)) {
-                const base = path.basename(entryPathLower);
-                if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.lang") {
-                  esEsLangPathsFound.add(entry.entryName);
-                }
-                if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
-                  esMxLangPathsFound.add(entry.entryName);
-                }
+          const langEntries = fastIndex.getLangEntriesForNamespace(namespace);
+          for (const langEnt of langEntries) {
+            const baseName = path.basename(langEnt.entryNameLower);
+            try {
+              if (baseName.includes("es__es") || baseName.includes("es-es") || baseName.includes("es_es") || baseName === "es.lang") {
+                esEsLangPathsFound.add(langEnt.entryName);
+                const parsed = parseLegacyLang(langEnt.entry.getData().toString("utf-8"));
+                existingEsEsMap = { ...existingEsEsMap, ...parsed };
               }
-            }
-          } catch (e) {}
+              if (baseName.includes("es__mx") || baseName.includes("es-mx") || baseName.includes("es_mx")) {
+                esMxLangPathsFound.add(langEnt.entryName);
+                const parsed = parseLegacyLang(langEnt.entry.getData().toString("utf-8"));
+                existingEsMxMap = { ...existingEsMxMap, ...parsed };
+              }
+            } catch (e) {}
+          }
 
           for (const pathFound of esEsLangPathsFound) {
             try {
@@ -1783,28 +1853,28 @@ export async function analyzeModFile(
   options: TranslationOptions
 ): Promise<AnalysisResult> {
   const zip = new AdmZip(originalFilePath);
-  const entries = zip.getEntries();
+  const rawEntries = zip.getEntries();
+  const fastIndex = new FastZipIndex(rawEntries);
+  const entries = fastIndex.getAllIndexedEntries();
   const originalName = path.basename(originalFilePath);
   const glossary = { ...DEFAULT_GLOSSARY, ...options.customGlossary };
 
   // 1. Identify translatable files
   const translatableEntries: { entry: any; type: string; namespace: string }[] = [];
-  for (const entry of entries) {
-    const entryPath = entry.entryName;
-    if (entry.isDirectory || entryPath.endsWith(".class")) continue;
+  for (const indexed of entries) {
+    const entry = indexed.entry;
+    const entryPath = indexed.entryName;
 
     const assetsMatch = entryPath.match(/^assets\/([a-zA-Z0-9_-]+)\/(.+)$/);
     const dataMatch = entryPath.match(/^data\/([a-zA-Z0-9_-]+)\/(.+)$/);
 
     if (options.translateLang || options.translateAll) {
-      if (assetsMatch && assetsMatch[2].startsWith("lang/") && assetsMatch[2].endsWith(".json")) {
-        if (assetsMatch[2] === "lang/en_us.json" || assetsMatch[2].includes("en_")) {
+      if (assetsMatch && assetsMatch[2].startsWith("lang/")) {
+        if (assetsMatch[2].endsWith(".json")) {
           translatableEntries.push({ entry, type: "lang_json", namespace: assetsMatch[1] });
           continue;
         }
-      }
-      if (assetsMatch && assetsMatch[2].startsWith("lang/") && assetsMatch[2].endsWith(".lang")) {
-        if (assetsMatch[2] === "lang/en_us.lang" || assetsMatch[2].includes("en_")) {
+        if (assetsMatch[2].endsWith(".lang")) {
           translatableEntries.push({ entry, type: "lang_legacy", namespace: assetsMatch[1] });
           continue;
         }
@@ -1879,26 +1949,25 @@ export async function analyzeModFile(
         const esEsPathsFound = new Set<string>([esEsPath]);
         const esMxPathsFound = new Set<string>([esMxPath]);
 
-        try {
-          const langDir = `assets/${namespace}/lang/`.toLowerCase();
-          for (const ent of entries) {
-            if (ent.isDirectory) continue;
-            const entPathLower = ent.entryName.toLowerCase();
-            if (entPathLower.startsWith(langDir)) {
-              const base = path.basename(entPathLower);
-              if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.json") {
-                esEsPathsFound.add(ent.entryName);
-              }
-              if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
-                esMxPathsFound.add(ent.entryName);
-              }
+        const langEntries = fastIndex.getLangEntriesForNamespace(namespace);
+        for (const langEnt of langEntries) {
+          const baseName = path.basename(langEnt.entryNameLower);
+          try {
+            const parsed = JSON.parse(langEnt.entry.getData().toString("utf-8"));
+            if (baseName.includes("es__es") || baseName.includes("es-es") || baseName.includes("es_es") || baseName === "es.json") {
+              esEsPathsFound.add(langEnt.entryName);
+              existingEsEs = { ...existingEsEs, ...parsed };
             }
-          }
-        } catch (e) {}
+            if (baseName.includes("es__mx") || baseName.includes("es-mx") || baseName.includes("es_mx")) {
+              esMxPathsFound.add(langEnt.entryName);
+              existingEsMx = { ...existingEsMx, ...parsed };
+            }
+          } catch (e) {}
+        }
 
         for (const pathFound of esEsPathsFound) {
           try {
-            const esEsEntry = zip.getEntry(pathFound);
+            const esEsEntry = fastIndex.getEntry(pathFound);
             if (esEsEntry) {
               const parsed = JSON.parse(esEsEntry.getData().toString("utf-8"));
               existingEsEs = { ...existingEsEs, ...parsed };
@@ -1908,7 +1977,7 @@ export async function analyzeModFile(
 
         for (const pathFound of esMxPathsFound) {
           try {
-            const esMxEntry = zip.getEntry(pathFound);
+            const esMxEntry = fastIndex.getEntry(pathFound);
             if (esMxEntry) {
               const parsed = JSON.parse(esMxEntry.getData().toString("utf-8"));
               existingEsMx = { ...existingEsMx, ...parsed };
@@ -2008,23 +2077,6 @@ export async function analyzeModFile(
         const esEsLangPathsFound = new Set<string>([esEsPath]);
         const esMxLangPathsFound = new Set<string>([esMxPath]);
 
-        try {
-          const langDir = `assets/${namespace}/lang/`.toLowerCase();
-          for (const ent of entries) {
-            if (ent.isDirectory) continue;
-            const entPathLower = ent.entryName.toLowerCase();
-            if (entPathLower.startsWith(langDir)) {
-              const base = path.basename(entPathLower);
-              if (base.includes("es__es") || base.includes("es-es") || base.includes("es_es") || base === "es.lang") {
-                esEsLangPathsFound.add(ent.entryName);
-              }
-              if (base.includes("es__mx") || base.includes("es-mx") || base.includes("es_mx")) {
-                esMxLangPathsFound.add(ent.entryName);
-              }
-            }
-          }
-        } catch (e) {}
-
         const parseLegacyLang = (fileContent: string) => {
           const map: Record<string, string> = {};
           const lines = fileContent.split(/\r?\n/);
@@ -2038,6 +2090,23 @@ export async function analyzeModFile(
           }
           return map;
         };
+
+        const langEntries = fastIndex.getLangEntriesForNamespace(namespace);
+        for (const langEnt of langEntries) {
+          const baseName = path.basename(langEnt.entryNameLower);
+          try {
+            if (baseName.includes("es__es") || baseName.includes("es-es") || baseName.includes("es_es") || baseName === "es.lang") {
+              esEsLangPathsFound.add(langEnt.entryName);
+              const parsed = parseLegacyLang(langEnt.entry.getData().toString("utf-8"));
+              existingEsEsMap = { ...existingEsEsMap, ...parsed };
+            }
+            if (baseName.includes("es__mx") || baseName.includes("es-mx") || baseName.includes("es_mx")) {
+              esMxLangPathsFound.add(langEnt.entryName);
+              const parsed = parseLegacyLang(langEnt.entry.getData().toString("utf-8"));
+              existingEsMxMap = { ...existingEsMxMap, ...parsed };
+            }
+          } catch (e) {}
+        }
 
         for (const pathFound of esEsLangPathsFound) {
           try {
