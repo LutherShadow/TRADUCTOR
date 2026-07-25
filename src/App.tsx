@@ -1127,9 +1127,11 @@ export default function App() {
                 cleanTask.diff = task.diff;
               }
 
-              setDoc(taskDocRef, cleanTask, { merge: true }).catch(err => {
-                console.error("Error client-syncing task to Firestore:", err);
-              });
+              if (user && user.uid === targetUserId) {
+                setDoc(taskDocRef, cleanTask, { merge: true }).catch(err => {
+                  console.warn("[Firestore Sync Notice] Client-sync task document notice:", err?.message || err);
+                });
+              }
             }
           });
         }

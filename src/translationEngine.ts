@@ -55,6 +55,7 @@ export interface TranslationOptions {
   translationStyle?: "natural" | "literal";
   customGlossary: Record<string, string>;
   apiEngine?: string;
+  openrouterModel?: string;
   customApiKeys?: Record<string, string>;
 }
 
@@ -188,6 +189,7 @@ async function translateWithOpenAICompatible(
 
   const body: any = {
     model: modelName,
+    max_tokens: 4000,
     messages: [
       { role: "system", content: systemInstruction },
       { role: "user", content: JSON.stringify(batchPayload) }
@@ -426,9 +428,10 @@ ${styleDescription}
     if (engine === "openrouter") {
       const apiKey = customKeys.openrouter;
       if (!apiKey) throw new Error("Clave API de OpenRouter no configurada.");
+      const openModel = options.openrouterModel || "google/gemini-2.5-flash";
       return await translateWithOpenAICompatible(
         "https://openrouter.ai/api/v1/chat/completions",
-        "google/gemini-2.5-flash",
+        openModel,
         apiKey,
         systemInstruction,
         batch,
