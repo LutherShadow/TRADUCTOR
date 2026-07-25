@@ -719,6 +719,7 @@ export interface TomlExtractedItem {
   keyName: string;
   quoteType: '"""' | "'''" | '"' | "'";
   value: string;
+  comment?: string;
 }
 
 export function extractTomlStrings(content: string): TomlExtractedItem[] {
@@ -729,12 +730,21 @@ export function extractTomlStrings(content: string): TomlExtractedItem[] {
     const rawLine = lines[i];
     const line = rawLine.trim();
 
+    if (line.startsWith("#")) continue;
+
     if (line.startsWith("displayName") || line.startsWith("description") || line.startsWith("display_name")) {
       const eqIdx = rawLine.indexOf("=");
       if (eqIdx === -1) continue;
 
       const keyName = rawLine.substring(0, eqIdx).trim();
-      const valRest = rawLine.substring(eqIdx + 1).trim();
+      let valRest = rawLine.substring(eqIdx + 1).trim();
+
+      // Fix accidental double opening quotes if present in source (e.g. ""Gobber 2")
+      if (valRest.startsWith('""') && !valRest.startsWith('"""')) {
+        valRest = valRest.substring(1);
+      } else if (valRest.startsWith("''") && !valRest.startsWith("'''")) {
+        valRest = valRest.substring(1);
+      }
 
       // Check for triple quote (multiline)
       if (valRest.startsWith('"""') || valRest.startsWith("'''")) {
@@ -744,12 +754,14 @@ export function extractTomlStrings(content: string): TomlExtractedItem[] {
         const closingIdx = afterTriple.indexOf(triple);
         if (closingIdx !== -1) {
           const valText = afterTriple.substring(0, closingIdx);
-          results.push({ startLine: i, endLine: i, keyName, quoteType: triple, value: valText });
+          const comment = afterTriple.substring(closingIdx + 3);
+          results.push({ startLine: i, endLine: i, keyName, quoteType: triple, value: valText, comment });
         } else {
           const multilineParts: string[] = [];
           if (afterTriple.length > 0) multilineParts.push(afterTriple);
 
           let endLine = i;
+          let comment = "";
           for (let j = i + 1; j < lines.length; j++) {
             const nextLineRaw = lines[j];
             const closePos = nextLineRaw.indexOf(triple);
@@ -757,22 +769,38 @@ export function extractTomlStrings(content: string): TomlExtractedItem[] {
               endLine = j;
               const beforeClose = nextLineRaw.substring(0, closePos);
               if (beforeClose.length > 0) multilineParts.push(beforeClose);
+              comment = nextLineRaw.substring(closePos + 3);
               break;
             } else {
               multilineParts.push(nextLineRaw);
             }
           }
-          results.push({ startLine: i, endLine, keyName, quoteType: triple, value: multilineParts.join("\n") });
+          results.push({ startLine: i, endLine, keyName, quoteType: triple, value: multilineParts.join("\n"), comment });
           i = endLine;
         }
       }
       // Single line quote
       else if (valRest.startsWith('"') || valRest.startsWith("'")) {
         const quote = valRest[0] as '"' | "'";
-        const lastQuoteIdx = valRest.lastIndexOf(quote);
-        if (lastQuoteIdx > 0 && lastQuoteIdx !== 0) {
-          const valText = valRest.substring(1, lastQuoteIdx);
-          results.push({ startLine: i, endLine: i, keyName, quoteType: quote, value: valText });
+        // Search for closing quote matching `quote`
+        let closeIdx = -1;
+        let escaped = false;
+        for (let k = 1; k < valRest.length; k++) {
+          const ch = valRest[k];
+          if (escaped) {
+            escaped = false;
+          } else if (ch === '\\') {
+            escaped = true;
+          } else if (ch === quote) {
+            closeIdx = k;
+            break;
+          }
+        }
+
+        if (closeIdx > 0) {
+          const valText = valRest.substring(1, closeIdx);
+          const comment = valRest.substring(closeIdx + 1);
+          results.push({ startLine: i, endLine: i, keyName, quoteType: quote, value: valText, comment });
         }
       }
     }
@@ -784,24 +812,50 @@ export function extractTomlStrings(content: string): TomlExtractedItem[] {
 import { parse as parseToml } from "smol-toml";
 import { autoRepairTomlSyntax } from "./utils/tomlValidator";
 
+function sanitizeTomlValue(text: string, quoteType: string): string {
+  if (!text) return "";
+  let clean = text.trim();
+
+  // If the string is enclosed in matching quotes, strip them
+  if ((clean.startsWith('"') && clean.endsWith('"') && clean.length >= 2) ||
+      (clean.startsWith("'") && clean.endsWith("'") && clean.length >= 2)) {
+    clean = clean.substring(1, clean.length - 1).trim();
+  }
+
+  // Remove leading/trailing duplicate quotes matching quoteType
+  if (quoteType === '"' || quoteType === "'") {
+    while (clean.startsWith(quoteType)) {
+      clean = clean.substring(1).trim();
+    }
+    while (clean.endsWith(quoteType) && !clean.endsWith("\\" + quoteType)) {
+      clean = clean.substring(0, clean.length - 1).trim();
+    }
+  }
+
+  return clean;
+}
+
 export function applyTomlTranslations(content: string, itemsToReplace: { item: TomlExtractedItem; newText: string }[]): string {
   const lines = content.split(/\r?\n/);
 
   itemsToReplace.sort((a, b) => b.item.startLine - a.item.startLine);
 
   for (const { item, newText } of itemsToReplace) {
-    const { startLine, endLine, keyName, quoteType } = item;
-    
+    const { startLine, endLine, keyName, quoteType, comment } = item;
+    const cleanText = sanitizeTomlValue(newText, quoteType);
+
     let replacementLines: string[] = [];
+    const commentSuffix = comment && comment.trim().length > 0 ? (comment.startsWith(" ") ? comment : ` ${comment}`) : "";
+
     if (quoteType === '"""' || quoteType === "'''") {
       replacementLines = [
         `${keyName} = ${quoteType}`,
-        newText,
-        quoteType
+        cleanText,
+        `${quoteType}${commentSuffix}`
       ];
     } else {
-      const escaped = newText.replace(/\\/g, "\\\\").replace(new RegExp(quoteType === '"' ? '"' : "'", "g"), "\\" + quoteType);
-      replacementLines = [`${keyName} = ${quoteType}${escaped}${quoteType}`];
+      const escaped = cleanText.replace(/\\/g, "\\\\").replace(new RegExp(quoteType === '"' ? '"' : "'", "g"), "\\" + quoteType);
+      replacementLines = [`${keyName} = ${quoteType}${escaped}${quoteType}${commentSuffix}`];
     }
 
     const deleteCount = endLine - startLine + 1;

@@ -106,16 +106,45 @@ export function autoRepairTomlSyntax(content: string): string {
       const eqIdx = line.indexOf("=");
       if (eqIdx !== -1) {
         const key = line.substring(0, eqIdx);
-        let val = line.substring(eqIdx + 1).trim();
+        let valRest = line.substring(eqIdx + 1).trim();
+
+        // Fix accidental double opening quotes if present (e.g. ""Gobber 2")
+        if (valRest.startsWith('""') && !valRest.startsWith('"""')) {
+          valRest = valRest.substring(1);
+        } else if (valRest.startsWith("''") && !valRest.startsWith("'''")) {
+          valRest = valRest.substring(1);
+        }
+
+        // Separate value and comment if present
+        let comment = "";
+        const hashIdx = valRest.indexOf("#");
+        if (hashIdx !== -1) {
+          const quoteChar = valRest[0];
+          if (quoteChar === '"' || quoteChar === "'") {
+            const firstQuote = valRest.indexOf(quoteChar);
+            const secondQuote = valRest.indexOf(quoteChar, firstQuote + 1);
+            if (secondQuote !== -1 && hashIdx > secondQuote) {
+              comment = valRest.substring(secondQuote);
+              valRest = valRest.substring(0, secondQuote + 1);
+            } else if (secondQuote === -1 && hashIdx > firstQuote) {
+              comment = valRest.substring(hashIdx);
+              valRest = valRest.substring(0, hashIdx).trim();
+            }
+          } else {
+            comment = valRest.substring(hashIdx);
+            valRest = valRest.substring(0, hashIdx).trim();
+          }
+        }
 
         // If line has an unclosed single double quote
-        if (val.startsWith('"') && !val.endsWith('"') && !val.includes('"""')) {
-          val = val + '"';
-          line = `${key}= ${val}`;
-        } else if (val.startsWith("'") && !val.endsWith("'") && !val.includes("'''")) {
-          val = val + "'";
-          line = `${key}= ${val}`;
+        if (valRest.startsWith('"') && !valRest.endsWith('"') && !valRest.includes('"""')) {
+          valRest = valRest + '"';
+        } else if (valRest.startsWith("'") && !valRest.endsWith("'") && !valRest.includes("'''")) {
+          valRest = valRest + "'";
         }
+
+        const commentSuffix = comment ? (comment.startsWith(" ") ? comment : ` ${comment}`) : "";
+        line = `${key}= ${valRest}${commentSuffix}`;
       }
     }
 
